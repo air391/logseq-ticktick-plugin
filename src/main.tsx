@@ -103,6 +103,32 @@ const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<bo
 
     if (mapping && mapping.service === service) {
       const currentRemote = await ticktick.getTask(mapping.projectId, mapping.taskId);
+
+      if (!showMessage) {
+        const baseline = await getSyncBaseline(contentTree);
+        const localSnapshot = snapshotFromLocalContent(contentTree.content || '');
+        const remoteSnapshot = snapshotFromRemoteTask(currentRemote);
+        const decision = classifySyncState(baseline, localSnapshot, remoteSnapshot);
+
+        if (decision === 'pull-remote') {
+          console.info(`Skipped automatic push because Dida changed first for task ${mapping.taskId}`);
+          return false;
+        }
+        if (decision === 'conflict') {
+          suppressLocalPush(contentTree.uuid);
+          await markSyncConflict(contentTree);
+          console.warn(`Skipped automatic push because both sides changed for task ${mapping.taskId}`);
+          return false;
+        }
+        if (decision === 'unchanged' || decision === 'converged') {
+          if (decision === 'converged') {
+            suppressLocalPush(contentTree.uuid);
+            await saveSyncBaseline(contentTree, remoteSnapshot);
+          }
+          return true;
+        }
+      }
+
       const remoteCompleted = currentRemote.status === 1 || Boolean(currentRemote.completedTime);
       if (remoteCompleted && local.marker !== 'DONE') {
         if (showMessage) {
