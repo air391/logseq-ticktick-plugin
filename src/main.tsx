@@ -8,9 +8,12 @@ import { BlockEntity } from '@logseq/libs/dist/LSPlugin';
 import {
   findBlockBoundToRemoteTask,
   getRemoteTaskMapping,
+  getSyncBaseline,
   listRemoteTaskBindings,
+  markSyncConflict,
   removeRemoteTaskMapping,
   saveRemoteTaskMapping,
+  saveSyncBaseline,
 } from './sync-state';
 import { openTaskPicker, TaskChoice } from './task-picker';
 import { refreshDidaInbox, removeInboxProjection } from './dida-inbox';
@@ -19,6 +22,11 @@ import {
   parseLocalTaskState,
   remoteTaskToBlockContent,
 } from './task-state';
+import {
+  classifySyncState,
+  snapshotFromLocalContent,
+  snapshotFromRemoteTask,
+} from './sync-conflict';
 
 const pluginId = PackageLogseq.id;
 const ticktick = new TickTick();
@@ -62,7 +70,7 @@ const subtaskTitle = (content: string): string =>
     .split(/\r?\n/)[0]
     .trim();
 
-const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<void> => {
+const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<boolean> => {
   const { service } = getTickTickSettings();
   const serviceName = service === 'dida' ? 'Dida365' : 'TickTick';
 
@@ -73,7 +81,7 @@ const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<vo
     const local = parseLocalTaskState(contentTree.content || '');
     if (!local.title) {
       if (showMessage) await logseq.UI.showMsg('Task title cannot be empty.', 'warning', { timeout: 3000 });
-      return;
+      return false;
     }
 
     const flatTree = flattenTree(contentTree);
@@ -106,7 +114,7 @@ const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<vo
         } else {
           console.warn(`Skipped automatic reopen for completed Dida task ${mapping.taskId}`);
         }
-        return;
+        return false;
       }
 
       remoteTask = await ticktick.updateTask({
@@ -129,6 +137,7 @@ const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<vo
 
     suppressLocalPush(block.uuid);
     await saveRemoteTaskMapping(block, service, remoteTask);
+    await saveSyncBaseline(block, snapshotFromRemoteTask(remoteTask));
     await removeInboxProjection(remoteTask.id);
 
     if (showMessage) {
@@ -136,6 +145,7 @@ const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<vo
         timeout: 3000,
       });
     }
+    return true;
   } catch (error) {
     console.error(error);
     if (showMessage) {
@@ -143,6 +153,7 @@ const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<vo
         timeout: 4000,
       });
     }
+    return false;
   }
 };
 
@@ -169,6 +180,7 @@ const pullRemoteTask = async (block: BlockEntity): Promise<void> => {
     await applyRemoteTaskToBlock(block, remote);
     suppressLocalPush(block.uuid);
     await saveRemoteTaskMapping(block, mapping.service, remote);
+    await saveSyncBaseline(block, snapshotFromRemoteTask(remote));
     await logseq.UI.showMsg('Remote task pulled into Logseq.', 'success', {
       timeout: 3000,
     });
@@ -191,10 +203,13 @@ const pullAllLinkedTasks = async (showMessage = false): Promise<void> => {
   for (const { block, mapping } of bindings) {
     if (mapping.service !== service) continue;
     try {
+      const latest = await logseq.Editor.getBlock(block.uuid);
+      if (!latest) continue;
       const remote = await ticktick.getTask(mapping.projectId, mapping.taskId);
-      if (await applyRemoteTaskToBlock(block, remote)) updated += 1;
-      suppressLocalPush(block.uuid);
-      await saveRemoteTaskMapping(block, mapping.service, remote);
+      if (await applyRemoteTaskToBlock(latest, remote)) updated += 1;
+      suppressLocalPush(latest.uuid);
+      await saveRemoteTaskMapping(latest, mapping.service, remote);
+      await saveSyncBaseline(latest, snapshotFromRemoteTask(remote));
     } catch (error) {
       failed += 1;
       console.warn(`Failed to pull linked task ${mapping.taskId}`, error);
@@ -207,6 +222,44 @@ const pullAllLinkedTasks = async (showMessage = false): Promise<void> => {
       failed ? 'warning' : 'success',
       { timeout: 3500 },
     );
+  }
+};
+
+const reconcileLinkedTasks = async (): Promise<void> => {
+  const { service, accessToken } = getTickTickSettings();
+  if (!accessToken) return;
+
+  const bindings = await listRemoteTaskBindings();
+  for (const { block, mapping } of bindings) {
+    if (mapping.service !== service) continue;
+
+    try {
+      const latest = await logseq.Editor.getBlock(block.uuid);
+      if (!latest) continue;
+      const remote = await ticktick.getTask(mapping.projectId, mapping.taskId);
+      const baseline = await getSyncBaseline(latest);
+      const localSnapshot = snapshotFromLocalContent(latest.content || '');
+      const remoteSnapshot = snapshotFromRemoteTask(remote);
+      const decision = classifySyncState(baseline, localSnapshot, remoteSnapshot);
+
+      if (decision === 'pull-remote') {
+        await applyRemoteTaskToBlock(latest, remote);
+        suppressLocalPush(latest.uuid);
+        await saveRemoteTaskMapping(latest, mapping.service, remote);
+        await saveSyncBaseline(latest, remoteSnapshot);
+      } else if (decision === 'keep-local') {
+        await pushLocalTask(latest, false);
+      } else if (decision === 'converged') {
+        suppressLocalPush(latest.uuid);
+        await saveSyncBaseline(latest, remoteSnapshot);
+      } else if (decision === 'conflict') {
+        suppressLocalPush(latest.uuid);
+        await markSyncConflict(latest);
+        console.warn(`Dida sync conflict for block ${latest.uuid} / task ${mapping.taskId}`);
+      }
+    } catch (error) {
+      console.warn(`Failed to reconcile linked task ${mapping.taskId}`, error);
+    }
   }
 };
 
@@ -239,6 +292,7 @@ const linkExistingTask = async (block: BlockEntity): Promise<void> => {
 
       suppressLocalPush(block.uuid);
       await saveRemoteTaskMapping(block, service, choice.task);
+      await saveSyncBaseline(block, snapshotFromRemoteTask(choice.task));
       await removeInboxProjection(choice.task.id);
 
       const local = parseLocalTaskState(block.content || '');
@@ -299,13 +353,14 @@ const refreshInbox = async (showMessage = true): Promise<void> => {
   }
 };
 
-const refreshInboxSafely = async (): Promise<void> => {
+const refreshAllSafely = async (): Promise<void> => {
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
+    await reconcileLinkedTasks();
     await refreshInbox(false);
   } catch (error) {
-    console.error('Background Dida Inbox refresh failed', error);
+    console.error('Background Dida sync failed', error);
   } finally {
     refreshInFlight = false;
   }
@@ -318,11 +373,11 @@ const configureAutoRefresh = (): void => {
   }
 
   const settings = getTickTickSettings();
-  if (settings.service !== 'dida' || !settings.accessToken || !settings.autoRefreshDidaInbox) return;
+  if (settings.service !== 'dida' || !settings.accessToken || !settings.autoSyncDida) return;
 
-  void refreshInboxSafely();
+  void refreshAllSafely();
   refreshTimer = setInterval(() => {
-    void refreshInboxSafely();
+    void refreshAllSafely();
   }, REFRESH_INTERVAL_MS);
 };
 
