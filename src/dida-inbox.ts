@@ -1,6 +1,10 @@
 import { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin';
 import { Project, Task } from './ticktick/task';
 import { queryBlocksByPluginProperty, readPluginProperty } from './property-query';
+import {
+  DIDA_INBOX_MANAGED_PROPERTIES,
+  projectionVisibleContent,
+} from './inbox-content';
 
 const INBOX_PAGE_NAME = 'Dida Inbox';
 const INBOX_TASK_ID_PROPERTY = 'dida-inbox-task-id';
@@ -8,25 +12,7 @@ const INBOX_PROJECT_ID_PROPERTY = 'dida-inbox-project-id';
 const INBOX_PROJECT_NAME_PROPERTY = 'dida-inbox-project-name';
 const INBOX_TASK_URL_PROPERTY = 'dida-inbox-task-url';
 const INBOX_MANAGED_CONTENT_PROPERTY = 'dida-inbox-managed-content';
-const INBOX_PROPERTIES = [
-  INBOX_TASK_ID_PROPERTY,
-  INBOX_PROJECT_ID_PROPERTY,
-  INBOX_PROJECT_NAME_PROPERTY,
-  INBOX_TASK_URL_PROPERTY,
-  INBOX_MANAGED_CONTENT_PROPERTY,
-];
-
-export const projectionVisibleContent = (content: string): string => {
-  const propertyPrefixes = INBOX_PROPERTIES.map((property) => `${property}::`);
-  return content
-    .split(/\r?\n/)
-    .filter((line) => {
-      const trimmed = line.trimStart();
-      return !propertyPrefixes.some((prefix) => trimmed.startsWith(prefix));
-    })
-    .join('\n')
-    .trim();
-};
+const INBOX_PROPERTIES = [...DIDA_INBOX_MANAGED_PROPERTIES];
 
 const findInboxProjection = async (taskId: string): Promise<BlockEntity | null> => {
   try {
