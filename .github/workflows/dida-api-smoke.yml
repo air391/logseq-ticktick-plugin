@@ -103,3 +103,39 @@ jobs:
           TASK_ID=""
 
           echo "Dida real API CRUD smoke test passed."
+
+      - name: Verify plugin-shaped create request without projectId
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          API_BASE="https://api.dida365.com/open/v1"
+          TITLE="[logseq-plugin-shape-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          RESPONSE_FILE="$(mktemp)"
+          STATUS="$(curl -sS -o "$RESPONSE_FILE" -w '%{http_code}' \
+            -X POST "$API_BASE/task" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg title "$TITLE" '{title:$title,priority:0,items:[]}')")"
+
+          echo "HTTP status: $STATUS"
+          cat "$RESPONSE_FILE" | jq . || cat "$RESPONSE_FILE"
+
+          if [[ "$STATUS" -lt 200 || "$STATUS" -ge 300 ]]; then
+            echo "Plugin-shaped create request without projectId is not supported by Dida."
+            exit 1
+          fi
+
+          TASK_ID="$(jq -r '.id // empty' "$RESPONSE_FILE")"
+          PROJECT_ID="$(jq -r '.projectId // empty' "$RESPONSE_FILE")"
+
+          if [[ -z "$TASK_ID" || -z "$PROJECT_ID" ]]; then
+            echo "Create succeeded but task/project id was missing."
+            exit 1
+          fi
+
+          curl -fsS -X DELETE \
+            "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null
+
+          echo "Plugin-shaped create request is supported and cleaned up."
