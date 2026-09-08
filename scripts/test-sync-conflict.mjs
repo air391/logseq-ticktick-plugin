@@ -14,6 +14,7 @@ try {
       'exec',
       'tsc',
       'src/sync-conflict.ts',
+      'src/checklist-plan.ts',
       'src/task-state.ts',
       'src/ticktick/task.ts',
       '--target',
@@ -33,12 +34,16 @@ try {
   const directPath = join(tempDir, 'sync-conflict.js');
   const nestedPath = join(tempDir, 'src', 'sync-conflict.js');
   const compiledPath = existsSync(directPath) ? directPath : nestedPath;
+  const directPlanPath = join(tempDir, 'checklist-plan.js');
+  const nestedPlanPath = join(tempDir, 'src', 'checklist-plan.js');
+  const compiledPlanPath = existsSync(directPlanPath) ? directPlanPath : nestedPlanPath;
   const {
     classifySyncState,
     parseSnapshot,
     snapshotFromLocalContent,
     snapshotFromRemoteTask,
   } = require(compiledPath);
+  const { planChecklistApply } = require(compiledPlanPath);
 
   const baseline = snapshotFromLocalContent('TODO Alpha', []);
   const sameLocal = snapshotFromLocalContent('TODO Alpha', []);
@@ -166,6 +171,13 @@ try {
     'pull-remote',
   );
 
+  assert.equal(planChecklistApply(['A', 'B'], ['A', 'B']), 'positional');
+  assert.equal(planChecklistApply(['A', 'B'], ['A edited', 'B']), 'positional');
+  assert.equal(planChecklistApply(['A', 'B'], ['A', 'B', 'C']), 'append');
+  assert.equal(planChecklistApply(['A', 'B'], ['A']), 'rebuild');
+  assert.equal(planChecklistApply(['A', 'B'], ['B', 'A']), 'rebuild');
+  assert.equal(planChecklistApply(['A', 'B'], ['A', 'Inserted', 'B']), 'rebuild');
+
   const legacyBaseline = JSON.stringify({
     title: 'Legacy', completed: false, priority: 0, startDate: null, dueDate: null,
   });
@@ -179,7 +191,7 @@ try {
   });
 
   assert.equal(classifySyncState(null, sameLocal, remoteTitleChanged), 'conflict');
-  console.log('Sync-state regression tests passed.');
+  console.log('Sync-state and checklist planner regression tests passed.');
 } finally {
   rmSync(tempDir, { recursive: true, force: true });
 }
