@@ -2,6 +2,7 @@ import { BlockEntity } from '@logseq/libs/dist/LSPlugin';
 import { TaskService } from './ticktick/ticktick';
 import { Task } from './ticktick/task';
 import { ManagedTaskSnapshot, parseSnapshot, serializeSnapshot } from './sync-conflict';
+import { queryBlocksByPluginProperty, readPluginProperty } from './property-query';
 
 export const TASK_ID_PROPERTY = 'remote-task-id';
 export const PROJECT_ID_PROPERTY = 'remote-project-id';
@@ -17,27 +18,16 @@ export interface RemoteTaskMapping {
   taskUrl?: string;
 }
 
-const readProperty = (properties: Record<string, any>, key: string): string => {
-  const exact = properties[key];
-  if (typeof exact === 'string') return exact;
-
-  const namespacedKey = Object.keys(properties).find((candidate) =>
-    candidate === key || candidate.endsWith(`.${key}`),
-  );
-  const value = namespacedKey ? properties[namespacedKey] : undefined;
-  return typeof value === 'string' ? value : '';
-};
-
 export const getRemoteTaskMapping = async (
   block: BlockEntity,
 ): Promise<RemoteTaskMapping | null> => {
   const properties = await logseq.Editor.getBlockProperties(block.uuid);
   if (!properties) return null;
 
-  const taskId = readProperty(properties, TASK_ID_PROPERTY);
-  const projectId = readProperty(properties, PROJECT_ID_PROPERTY);
-  const service = readProperty(properties, SERVICE_PROPERTY) as TaskService;
-  const taskUrl = readProperty(properties, TASK_URL_PROPERTY);
+  const taskId = readPluginProperty(properties, TASK_ID_PROPERTY);
+  const projectId = readPluginProperty(properties, PROJECT_ID_PROPERTY);
+  const service = readPluginProperty(properties, SERVICE_PROPERTY) as TaskService;
+  const taskUrl = readPluginProperty(properties, TASK_URL_PROPERTY);
 
   if (!taskId || !projectId || (service !== 'dida' && service !== 'ticktick')) return null;
 
@@ -54,7 +44,7 @@ export const getSyncBaseline = async (
 ): Promise<ManagedTaskSnapshot | null> => {
   const properties = await logseq.Editor.getBlockProperties(block.uuid);
   if (!properties) return null;
-  return parseSnapshot(readProperty(properties, SYNC_BASELINE_PROPERTY));
+  return parseSnapshot(readPluginProperty(properties, SYNC_BASELINE_PROPERTY));
 };
 
 export const saveSyncBaseline = async (
@@ -74,18 +64,9 @@ export const markSyncConflict = async (block: BlockEntity): Promise<void> => {
 export const findBlockBoundToRemoteTask = async (
   taskId: string,
 ): Promise<BlockEntity | null> => {
-  const query = `
-    [:find (pull ?b [*])
-     :in $ ?task-id
-     :where
-     [?b :block/properties ?props]
-     [(get ?props :remote-task-id) ?remote-id]
-     [(= ?remote-id ?task-id)]]
-  `;
-
   try {
-    const result = await logseq.DB.datascriptQuery(query, taskId);
-    return (result?.[0]?.[0] as BlockEntity | undefined) || null;
+    const blocks = await queryBlocksByPluginProperty(TASK_ID_PROPERTY, taskId);
+    return blocks[0] || null;
   } catch (error) {
     console.warn('Failed to query remote task binding', error);
     return null;
@@ -95,19 +76,10 @@ export const findBlockBoundToRemoteTask = async (
 export const listRemoteTaskBindings = async (): Promise<
   Array<{ block: BlockEntity; mapping: RemoteTaskMapping }>
 > => {
-  const query = `
-    [:find (pull ?b [*])
-     :where
-     [?b :block/properties ?props]
-     [(get ?props :remote-task-id) ?remote-id]]
-  `;
-
   try {
-    const rows = await logseq.DB.datascriptQuery(query);
+    const rows = await queryBlocksByPluginProperty(TASK_ID_PROPERTY);
     const bindings: Array<{ block: BlockEntity; mapping: RemoteTaskMapping }> = [];
-    for (const row of rows || []) {
-      const block = row?.[0] as BlockEntity | undefined;
-      if (!block) continue;
+    for (const block of rows) {
       const mapping = await getRemoteTaskMapping(block);
       if (mapping) bindings.push({ block, mapping });
     }
