@@ -1,0 +1,72 @@
+name: Dida Timestamp Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/dida-api-smoke
+    paths:
+      - .github/workflows/dida-timestamp-probe.yml
+      - src/sync-conflict.ts
+      - src/ticktick/task.ts
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DIDA_ACCESS_TOKEN: ${{ secrets.DIDA_ACCESS_TOKEN }}
+
+    steps:
+      - name: Probe remote modification timestamp fields
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_BASE="https://api.dida365.com/open/v1"
+          PROJECT_ID="$(curl -fsS "$API_BASE/project" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" | jq -r '.[0].id // empty')"
+          [[ -n "$PROJECT_ID" ]]
+
+          TITLE="[logseq-timestamp-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CREATE_FILE="$(mktemp)"
+          curl -fsS -X POST "$API_BASE/task" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg title "$TITLE" --arg projectId "$PROJECT_ID" '{title:$title,projectId:$projectId}')" > "$CREATE_FILE"
+
+          TASK_ID="$(jq -r '.id // empty' "$CREATE_FILE")"
+          cleanup() {
+            if [[ -n "${TASK_ID:-}" ]]; then
+              curl -fsS -X DELETE "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
+                -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          BEFORE="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          sleep 2
+          curl -fsS -X POST "$API_BASE/task/$TASK_ID" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg id "$TASK_ID" --arg projectId "$PROJECT_ID" --arg title "$TITLE updated" '{id:$id,projectId:$projectId,title:$title}')" >/dev/null
+          AFTER="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+
+          echo "Candidate timestamp fields present before update:"
+          jq -r '["modifiedTime","updatedTime","updateTime"] | map(select(. as $k | $ARGS.named.obj | has($k))) | join(",")' \
+            --argjson obj "$BEFORE" <<< '{}' || true
+
+          for key in modifiedTime updatedTime updateTime; do
+            before_value="$(jq -r --arg key "$key" '.[$key] // empty' <<< "$BEFORE")"
+            after_value="$(jq -r --arg key "$key" '.[$key] // empty' <<< "$AFTER")"
+            if [[ -n "$before_value" || -n "$after_value" ]]; then
+              echo "$key present; changed=$([[ "$before_value" != "$after_value" ]] && echo true || echo false)"
+            fi
+          done
+
+          if jq -e 'has("modifiedTime") or has("updatedTime") or has("updateTime")' <<< "$AFTER" >/dev/null; then
+            echo "At least one supported remote modification timestamp field is available."
+          else
+            echo "No supported remote modification timestamp field is exposed; conflicts will remain explicit."
+          fi
