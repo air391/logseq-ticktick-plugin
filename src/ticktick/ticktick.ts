@@ -2,6 +2,19 @@ import { NewTask, Project, ProjectData, Task, TaskUpdate } from './task';
 
 export type TaskService = 'dida' | 'ticktick';
 
+export class TaskServiceError extends Error {
+    public readonly status: number;
+
+    constructor(status: number, message: string) {
+        super(message);
+        this.name = 'TaskServiceError';
+        this.status = status;
+    }
+}
+
+export const isTaskNotFoundError = (error: unknown): boolean =>
+    error instanceof TaskServiceError && error.status === 404;
+
 interface ServiceConfig {
     apiBaseUrl: string;
     authUrl: string;
@@ -64,7 +77,7 @@ class TickTick {
             } catch {
                 // Keep the HTTP status as the error detail when the body is not JSON.
             }
-            throw new Error(`Task service request failed: ${detail}`);
+            throw new TaskServiceError(response.status, `Task service request failed: ${detail}`);
         }
 
         if (response.status === 204) {
@@ -92,7 +105,10 @@ class TickTick {
 
         const data = await response.json();
         if (!response.ok) {
-            throw new Error(`Failed to get access token: ${data.error_description || data.error || response.statusText}`);
+            throw new TaskServiceError(
+                response.status,
+                `Failed to get access token: ${data.error_description || data.error || response.statusText}`,
+            );
         }
 
         this.accessToken = data.access_token;
