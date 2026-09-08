@@ -10,18 +10,17 @@ export interface LocalTaskState {
   deadline?: string;
 }
 
-const MARKER_RE = /^(TODO|DONE|DOING|NOW|LATER|WAITING)\s+/;
-const PRIORITY_RE = /\[#([A-C])\]\s*/;
-const SCHEDULED_RE = /(?:^|\n)SCHEDULED:\s*<([^>]+)>/i;
-const DEADLINE_RE = /(?:^|\n)DEADLINE:\s*<([^>]+)>/i;
+const MARKER_RE = /^(TODO|DONE|DOING|NOW|LATER|WAITING)\s+/i;
+const PRIORITY_RE = /\[#([A-C])\]\s*/i;
+const SCHEDULED_RE = /^SCHEDULED:\s*<([^>]+)>\s*$/im;
+const DEADLINE_RE = /^DEADLINE:\s*<([^>]+)>\s*$/im;
 
 const priorityFromContent = (content: string): 0 | 1 | 3 | 5 => {
   const match = content.match(PRIORITY_RE);
   if (!match) return 0;
-  if (match[1] === 'A') return 5;
-  if (match[1] === 'B') return 3;
-  if (match[1] === 'C') return 1;
-  return 0;
+  if (match[1].toUpperCase() === 'A') return 5;
+  if (match[1].toUpperCase() === 'B') return 3;
+  return 1;
 };
 
 const priorityTag = (priority?: 0 | 1 | 3 | 5): string => {
@@ -31,20 +30,13 @@ const priorityTag = (priority?: 0 | 1 | 3 | 5): string => {
   return '';
 };
 
-const extractTimestamp = (content: string, regex: RegExp): string | undefined =>
-  content.match(regex)?.[1]?.trim() || undefined;
-
-const stripMetadataLines = (content: string): string =>
-  content
-    .replace(/(?:^|\n)SCHEDULED:\s*<[^>]+>/gi, '')
-    .replace(/(?:^|\n)DEADLINE:\s*<[^>]+>/gi, '')
-    .trim();
+const firstLine = (content: string): string => content.split(/\r?\n/)[0] || '';
 
 export const parseLocalTaskState = (content: string): LocalTaskState => {
-  const firstLine = stripMetadataLines(content);
-  const markerMatch = firstLine.match(MARKER_RE);
-  const marker = (markerMatch?.[1] as LogseqMarker) || null;
-  const title = firstLine
+  const titleLine = firstLine(content);
+  const markerMatch = titleLine.match(MARKER_RE);
+  const marker = (markerMatch?.[1]?.toUpperCase() as LogseqMarker) || null;
+  const title = titleLine
     .replace(MARKER_RE, '')
     .replace(PRIORITY_RE, '')
     .trim();
@@ -52,15 +44,15 @@ export const parseLocalTaskState = (content: string): LocalTaskState => {
   return {
     marker,
     title,
-    priority: priorityFromContent(firstLine),
-    scheduled: extractTimestamp(content, SCHEDULED_RE),
-    deadline: extractTimestamp(content, DEADLINE_RE),
+    priority: priorityFromContent(titleLine),
+    scheduled: content.match(SCHEDULED_RE)?.[1]?.trim(),
+    deadline: content.match(DEADLINE_RE)?.[1]?.trim(),
   };
 };
 
 const parseLogseqTimestamp = (value?: string): Date | undefined => {
   if (!value) return undefined;
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:\s+\w{3})?(?:\s+(\d{2}):(\d{2}))?/);
+  const match = value.match(/(\d{4})-(\d{2})-(\d{2})(?:\s+[^\s]+)?(?:\s+(\d{2}):(\d{2}))?/);
   if (!match) return undefined;
   const [, year, month, day, hour = '00', minute = '00'] = match;
   return new Date(
@@ -87,23 +79,42 @@ export const localStateToRemoteTask = (state: LocalTaskState): NewTask => ({
   isAllDay: !/\d{2}:\d{2}/.test(state.scheduled || state.deadline || ''),
 });
 
-const remoteDateToLogseqTimestamp = (value?: string): string | undefined => {
+const remoteDateToLogseqTimestamp = (value?: string, allDay = false): string | undefined => {
   if (!value) return undefined;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return undefined;
   const pad = (n: number) => String(n).padStart(2, '0');
   const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${weekdays[date.getDay()]} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const datePart = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${weekdays[date.getDay()]}`;
+  if (allDay) return datePart;
+  return `${datePart} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+const preservedBodyLines = (content: string): string[] => {
+  return content
+    .split(/\r?\n/)
+    .slice(1)
+    .filter((line) => !/^\s*(SCHEDULED|DEADLINE):\s*</i.test(line));
 };
 
 export const remoteTaskToBlockContent = (remote: Task, currentContent: string): string => {
   const current = parseLocalTaskState(currentContent);
-  const marker = remote.status === 1 || remote.completedTime ? 'DONE' : (current.marker === 'DONE' ? 'TODO' : current.marker || 'TODO');
-  const lines = [`${marker} ${priorityTag(remote.priority)}${remote.title}`.trim()];
+  const marker = remote.status === 1 || remote.completedTime
+    ? 'DONE'
+    : current.marker && current.marker !== 'DONE'
+      ? current.marker
+      : 'TODO';
 
-  const scheduled = remoteDateToLogseqTimestamp(remote.startDate);
-  const deadline = remoteDateToLogseqTimestamp(remote.dueDate);
+  const lines = [
+    `${marker} ${priorityTag(remote.priority)}${remote.title}`.trim(),
+    ...preservedBodyLines(currentContent),
+  ];
+
+  const allDay = Boolean(remote.isAllDay ?? remote.allDay);
+  const scheduled = remoteDateToLogseqTimestamp(remote.startDate, allDay);
+  const deadline = remoteDateToLogseqTimestamp(remote.dueDate, allDay);
   if (scheduled) lines.push(`SCHEDULED: <${scheduled}>`);
   if (deadline) lines.push(`DEADLINE: <${deadline}>`);
-  return lines.join('\n');
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 };
