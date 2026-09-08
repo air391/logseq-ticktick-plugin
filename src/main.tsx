@@ -24,7 +24,6 @@ import {
 } from './task-state';
 import {
   classifySyncState,
-  resolveConflictByTime,
   snapshotFromLocalContent,
   snapshotFromRemoteTask,
 } from './sync-conflict';
@@ -71,11 +70,7 @@ const subtaskTitle = (content: string): string =>
     .split(/\r?\n/)[0]
     .trim();
 
-const pushLocalTask = async (
-  block: BlockEntity,
-  showMessage = true,
-  forceResolvedConflict = false,
-): Promise<boolean> => {
+const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<boolean> => {
   const { service } = getTickTickSettings();
   const serviceName = service === 'dida' ? 'Dida365' : 'TickTick';
 
@@ -109,7 +104,7 @@ const pushLocalTask = async (
     if (mapping && mapping.service === service) {
       const currentRemote = await ticktick.getTask(mapping.projectId, mapping.taskId);
 
-      if (!showMessage && !forceResolvedConflict) {
+      if (!showMessage) {
         const baseline = await getSyncBaseline(contentTree);
         const localSnapshot = snapshotFromLocalContent(contentTree.content || '');
         const remoteSnapshot = snapshotFromRemoteTask(currentRemote);
@@ -303,26 +298,10 @@ const reconcileLinkedTasks = async (): Promise<void> => {
         suppressLocalPush(latest.uuid);
         await saveSyncBaseline(latest, remoteSnapshot);
       } else if (decision === 'conflict') {
-        if (!baseline) {
-          suppressLocalPush(latest.uuid);
-          await markSyncConflict(latest);
-          console.warn(`Dida sync needs an explicit first resolution for block ${latest.uuid} / task ${mapping.taskId}`);
-          continue;
-        }
-
-        const winner = resolveConflictByTime(latest.updatedAt, remote);
-        if (winner === 'remote') {
-          await applyRemoteTaskToBlock(latest, remote);
-          suppressLocalPush(latest.uuid);
-          await saveRemoteTaskMapping(latest, mapping.service, remote);
-          await saveSyncBaseline(latest, remoteSnapshot);
-        } else if (winner === 'local') {
-          await pushLocalTask(latest, false, true);
-        } else {
-          suppressLocalPush(latest.uuid);
-          await markSyncConflict(latest);
-          console.warn(`Dida sync conflict for block ${latest.uuid} / task ${mapping.taskId}`);
-        }
+        suppressLocalPush(latest.uuid);
+        await markSyncConflict(latest);
+        const reason = baseline ? 'both sides changed' : 'no sync baseline is available';
+        console.warn(`Dida sync conflict for block ${latest.uuid} / task ${mapping.taskId}: ${reason}`);
       }
     } catch (error) {
       if (isTaskNotFoundError(error)) {
@@ -452,8 +431,25 @@ const configureAutoRefresh = (): void => {
   }, REFRESH_INTERVAL_MS);
 };
 
-const scheduleAutomaticPush = (block: BlockEntity): void => {
-  if (localPushIsSuppressed(block.uuid)) return;
+const findManagedBlockForChange = async (changed: BlockEntity): Promise<BlockEntity | null> => {
+  let current: BlockEntity | null = await logseq.Editor.getBlock(changed.uuid);
+  const seen = new Set<number>();
+
+  for (let depth = 0; current && depth < 32; depth += 1) {
+    if (await getRemoteTaskMapping(current)) return current;
+
+    const parentId = current.parent?.id;
+    if (!parentId || seen.has(parentId)) return null;
+    seen.add(parentId);
+    current = await logseq.Editor.getBlock(parentId);
+  }
+
+  return null;
+};
+
+const scheduleAutomaticPush = async (changed: BlockEntity): Promise<void> => {
+  const block = await findManagedBlockForChange(changed);
+  if (!block || localPushIsSuppressed(block.uuid)) return;
 
   const existing = localPushTimers.get(block.uuid);
   if (existing) clearTimeout(existing);
@@ -514,7 +510,7 @@ const main = async (): Promise<void> => {
   }
 
   logseq.DB.onChanged(({ blocks }) => {
-    for (const block of blocks || []) scheduleAutomaticPush(block);
+    for (const block of blocks || []) void scheduleAutomaticPush(block);
   });
 
   logseq.Editor.registerSlashCommand('Dida Create / Sync', async () => {
