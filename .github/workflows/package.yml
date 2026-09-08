@@ -55,7 +55,7 @@ jobs:
           test "$PLUGIN_ID" = "logseq-ticktick-plugin"
           test -f "$ROOT/$MAIN"
 
-          mapfile -t ASSETS < <(grep -oE 'assets/[^"'"' ]+\.(js|css)' "$ROOT/$MAIN" | sort -u)
+          mapfile -t ASSETS < <(grep -oE 'assets/[^" ]+\.(js|css)' "$ROOT/$MAIN" | sort -u)
           test "${#ASSETS[@]}" -ge 2
           for asset in "${ASSETS[@]}"; do
             test -s "$ROOT/dist/$asset"
