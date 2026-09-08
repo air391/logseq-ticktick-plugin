@@ -16,6 +16,18 @@ const INBOX_PROPERTIES = [
   INBOX_MANAGED_CONTENT_PROPERTY,
 ];
 
+const projectionVisibleContent = (content: string): string => {
+  const propertyPrefixes = INBOX_PROPERTIES.map((property) => `${property}::`);
+  return content
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trimStart();
+      return !propertyPrefixes.some((prefix) => trimmed.startsWith(prefix));
+    })
+    .join('\n')
+    .trim();
+};
+
 const findInboxProjection = async (taskId: string): Promise<BlockEntity | null> => {
   try {
     const blocks = await queryBlocksByPluginProperty(INBOX_TASK_ID_PROPERTY, taskId);
@@ -54,8 +66,9 @@ const retireInboxProjection = async (block: BlockEntity): Promise<void> => {
   const managedContent = properties
     ? readPluginProperty(properties, INBOX_MANAGED_CONTENT_PROPERTY)
     : '';
+  const visibleContent = projectionVisibleContent(fresh.content || '');
   const isKnownUntouched =
-    Boolean(managedContent) && fresh.content.trim() === managedContent.trim();
+    Boolean(managedContent) && visibleContent === managedContent.trim();
   const hasChildren = (fresh.children || []).length > 0;
 
   // Only delete a projection when we can prove it is still exactly the disposable
@@ -69,10 +82,8 @@ const retireInboxProjection = async (block: BlockEntity): Promise<void> => {
   await clearInboxProjectionProperties(fresh);
 
   if (isKnownUntouched) {
-    const next = fresh.content.replace(/^TODO\s+/i, '').trim();
-    if (next && next !== fresh.content.trim()) {
-      await logseq.Editor.updateBlock(fresh.uuid, next);
-    }
+    const next = visibleContent.replace(/^TODO\s+/i, '').trim();
+    if (next) await logseq.Editor.updateBlock(fresh.uuid, next);
   }
 };
 
