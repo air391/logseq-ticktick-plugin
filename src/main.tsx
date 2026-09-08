@@ -77,6 +77,17 @@ const pushLocalTask = async (block: BlockEntity): Promise<void> => {
     let action: 'created' | 'updated';
 
     if (mapping && mapping.service === service) {
+      const currentRemote = await ticktick.getTask(mapping.projectId, mapping.taskId);
+      const remoteCompleted = currentRemote.status === 1 || Boolean(currentRemote.completedTime);
+      if (remoteCompleted && local.marker !== 'DONE') {
+        await logseq.UI.showMsg(
+          'The Dida task is already completed. Dida Open API cannot reliably reopen it; reopen it in Dida first or pull the remote state.',
+          'warning',
+          { timeout: 6000 },
+        );
+        return;
+      }
+
       remoteTask = await ticktick.updateTask({
         ...payload,
         id: mapping.taskId,
@@ -256,17 +267,13 @@ const refreshInbox = async (showMessage = true): Promise<void> => {
   }
 };
 
-const refreshAll = async (showMessage = false): Promise<void> => {
+const refreshInboxSafely = async (): Promise<void> => {
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
-    await pullAllLinkedTasks(showMessage);
     await refreshInbox(false);
   } catch (error) {
-    console.error('Background Dida refresh failed', error);
-    if (showMessage) {
-      await logseq.UI.showMsg('Dida refresh failed.', 'error', { timeout: 4000 });
-    }
+    console.error('Background Dida Inbox refresh failed', error);
   } finally {
     refreshInFlight = false;
   }
@@ -281,9 +288,9 @@ const configureAutoRefresh = (): void => {
   const settings = getTickTickSettings();
   if (settings.service !== 'dida' || !settings.accessToken || !settings.autoRefreshDidaInbox) return;
 
-  void refreshAll(false);
+  void refreshInboxSafely();
   refreshTimer = setInterval(() => {
-    void refreshAll(false);
+    void refreshInboxSafely();
   }, REFRESH_INTERVAL_MS);
 };
 
