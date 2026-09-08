@@ -62,7 +62,7 @@ const pushLocalTask = async (block: BlockEntity): Promise<void> => {
     const flatTree = flattenTree(contentTree);
     const subtasks: Subtask[] = flatTree
       .slice(1)
-      .map((child) => ({
+      .map((child): Subtask => ({
         title: subtaskTitle(child.content || ''),
         status: parseLocalTaskState(child.content || '').marker === 'DONE' ? 1 : 0,
       }))
