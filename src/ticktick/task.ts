@@ -27,6 +27,9 @@ export interface Task {
     status?: 0 | 1;
     timeZone?: string;
     taskUrl?: string;
+    modifiedTime?: string;
+    updatedTime?: string;
+    updateTime?: string;
 }
 
 export interface ProjectData {
