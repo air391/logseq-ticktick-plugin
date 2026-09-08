@@ -1,7 +1,7 @@
 {
   "name": "logseq-ticktick-plugin",
   "version": "1.1.2",
-  "description": "TickTick plugin for Logseq.",
+  "description": "Bidirectional Dida365/TickTick task synchronization for Logseq.",
   "main": "dist/index.html",
   "scripts": {
     "dev": "vite",
@@ -9,10 +9,10 @@
     "preinstall": "npx only-allow pnpm"
   },
   "license": "MIT",
-  "author": "Maximilian Schöll",
+  "author": "Maximilian Schöll; Dida365 sync fork maintained by air391",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mxschll/logseq-ticktick-plugin"
+    "url": "https://github.com/air391/logseq-ticktick-plugin"
   },
   "dependencies": {
     "@logseq/libs": "^0.0.14",
@@ -45,7 +45,7 @@
   },
   "logseq": {
     "id": "logseq-ticktick-plugin",
-    "title": "TickTick",
+    "title": "Dida365 / TickTick Sync",
     "icon": "./logo.png"
   }
 }
