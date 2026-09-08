@@ -16,6 +16,8 @@ export type SyncDecision =
   | 'converged'
   | 'conflict';
 
+export type ConflictWinner = 'local' | 'remote' | 'unresolvable';
+
 const normalizedDate = (value?: string): string | null => {
   if (!value) return null;
   const date = new Date(value);
@@ -74,4 +76,24 @@ export const classifySyncState = (
   if (localChanged && !remoteChanged) return 'keep-local';
   if (!localChanged && !remoteChanged) return 'unchanged';
   return 'conflict';
+};
+
+const parseTime = (value: string | number | undefined): number | null => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+export const remoteModifiedAt = (task: Task): number | null =>
+  parseTime(task.modifiedTime || task.updatedTime || task.updateTime);
+
+export const resolveConflictByTime = (
+  localUpdatedAt: number | undefined,
+  remote: Task,
+): ConflictWinner => {
+  const localTime = parseTime(localUpdatedAt);
+  const remoteTime = remoteModifiedAt(remote);
+  if (localTime === null || remoteTime === null) return 'unresolvable';
+  return localTime > remoteTime ? 'local' : 'remote';
 };
