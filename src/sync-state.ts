@@ -2,10 +2,10 @@ import { BlockEntity } from '@logseq/libs/dist/LSPlugin';
 import { TaskService } from './ticktick/ticktick';
 import { Task } from './ticktick/task';
 
-const TASK_ID_PROPERTY = 'remote-task-id';
-const PROJECT_ID_PROPERTY = 'remote-project-id';
-const SERVICE_PROPERTY = 'remote-task-service';
-const TASK_URL_PROPERTY = 'remote-task-url';
+export const TASK_ID_PROPERTY = 'remote-task-id';
+export const PROJECT_ID_PROPERTY = 'remote-project-id';
+export const SERVICE_PROPERTY = 'remote-task-service';
+export const TASK_URL_PROPERTY = 'remote-task-url';
 
 export interface RemoteTaskMapping {
   taskId: string;
@@ -52,15 +52,53 @@ export const getRemoteTaskMapping = async (
   };
 };
 
+export const findBlockBoundToRemoteTask = async (
+  taskId: string,
+): Promise<BlockEntity | null> => {
+  const query = `
+    [:find (pull ?b [*])
+     :in $ ?task-id
+     :where
+     [?b :block/properties ?props]
+     [(get ?props :remote-task-id) ?remote-id]
+     [(= ?remote-id ?task-id)]]
+  `;
+
+  try {
+    const result = await logseq.DB.datascriptQuery(query, taskId);
+    const block = result?.[0]?.[0] as BlockEntity | undefined;
+    return block || null;
+  } catch (error) {
+    console.warn('Failed to query remote task binding', error);
+    return null;
+  }
+};
+
 export const saveRemoteTaskMapping = async (
   block: BlockEntity,
   service: TaskService,
   task: Task,
 ): Promise<void> => {
+  const existing = await findBlockBoundToRemoteTask(task.id);
+  if (existing && existing.uuid !== block.uuid) {
+    throw new Error(`Remote task is already linked to block ${existing.uuid}`);
+  }
+
   await Promise.all([
     logseq.Editor.upsertBlockProperty(block.uuid, TASK_ID_PROPERTY, task.id),
     logseq.Editor.upsertBlockProperty(block.uuid, PROJECT_ID_PROPERTY, task.projectId),
     logseq.Editor.upsertBlockProperty(block.uuid, SERVICE_PROPERTY, service),
     logseq.Editor.upsertBlockProperty(block.uuid, TASK_URL_PROPERTY, task.taskUrl || ''),
+  ]);
+};
+
+export const removeRemoteTaskMapping = async (
+  block: BlockEntity,
+): Promise<void> => {
+  await Promise.all([
+    logseq.Editor.removeBlockProperty(block.uuid, TASK_ID_PROPERTY),
+    logseq.Editor.removeBlockProperty(block.uuid, PROJECT_ID_PROPERTY),
+    logseq.Editor.removeBlockProperty(block.uuid, SERVICE_PROPERTY),
+    logseq.Editor.removeBlockProperty(block.uuid, TASK_URL_PROPERTY),
   ]);
 };
