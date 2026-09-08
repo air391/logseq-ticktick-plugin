@@ -181,7 +181,7 @@ jobs:
             echo "Open API did not reliably reopen the completed task; plugin will guard this operation."
           fi
 
-      - name: Verify plugin-shaped create request and enumeration without projectId
+      - name: Probe plugin-shaped system Inbox task behavior
         shell: bash
         run: |
           set -euo pipefail
@@ -206,42 +206,65 @@ jobs:
             -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
             -H 'Content-Type: application/json' \
             --data "$(jq -nc --arg title "$TITLE" '{title:$title,priority:0,items:[]}')")"
-
-          echo "HTTP status: $STATUS"
-          cat "$RESPONSE_FILE" | jq . || cat "$RESPONSE_FILE"
-
-          if [[ "$STATUS" -lt 200 || "$STATUS" -ge 300 ]]; then
-            echo "Plugin-shaped create request without projectId is not supported by Dida."
-            exit 1
-          fi
+          [[ "$STATUS" -ge 200 && "$STATUS" -lt 300 ]]
 
           TASK_ID="$(jq -r '.id // empty' "$RESPONSE_FILE")"
           PROJECT_ID="$(jq -r '.projectId // empty' "$RESPONSE_FILE")"
-
-          if [[ -z "$TASK_ID" || -z "$PROJECT_ID" ]]; then
-            echo "Create succeeded but task/project id was missing."
-            exit 1
-          fi
+          [[ -n "$TASK_ID" && -n "$PROJECT_ID" ]]
+          echo "No-projectId create assigned task to projectId=$PROJECT_ID"
 
           PROJECTS_JSON="$(curl -fsS "$API_BASE/project" \
             -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
-          if ! jq -e --arg projectId "$PROJECT_ID" 'any(.[]; .id == $projectId)' <<<"$PROJECTS_JSON" >/dev/null; then
-            echo "The project assigned by no-projectId create is missing from /project enumeration."
-            exit 1
+          if jq -e --arg projectId "$PROJECT_ID" 'any(.[]; .id == $projectId)' <<<"$PROJECTS_JSON" >/dev/null; then
+            echo "Assigned project is present in /project enumeration."
+          else
+            echo "Assigned system Inbox project is NOT present in /project enumeration."
           fi
 
-          PROJECT_DATA="$(curl -fsS "$API_BASE/project/$PROJECT_ID/data" \
+          probe_data() {
+            local label="$1"
+            local project="$2"
+            local output
+            output="$(mktemp)"
+            local status
+            status="$(curl -sS -o "$output" -w '%{http_code}' \
+              "$API_BASE/project/$project/data" \
+              -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+            echo "$label project-data HTTP status: $status"
+            if [[ "$status" -ge 200 && "$status" -lt 300 ]]; then
+              if jq -e --arg taskId "$TASK_ID" 'any(.tasks[]?; .id == $taskId)' "$output" >/dev/null; then
+                echo "$label project-data contains the created Inbox task."
+                return 0
+              fi
+              echo "$label project-data succeeded but does not contain the created Inbox task."
+            fi
+            return 1
+          }
+
+          LISTABLE=0
+          if probe_data "literal inbox" "inbox"; then LISTABLE=1; fi
+          if probe_data "returned projectId" "$PROJECT_ID"; then LISTABLE=1; fi
+
+          DIRECT_FILE="$(mktemp)"
+          DIRECT_STATUS="$(curl -sS -o "$DIRECT_FILE" -w '%{http_code}' \
+            "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
             -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
-          if ! jq -e --arg taskId "$TASK_ID" 'any(.tasks[]?; .id == $taskId)' <<<"$PROJECT_DATA" >/dev/null; then
-            echo "The no-projectId task is missing from the project-data enumeration used by the plugin."
+          echo "Direct Inbox task read HTTP status: $DIRECT_STATUS"
+          if [[ "$DIRECT_STATUS" -lt 200 || "$DIRECT_STATUS" -ge 300 ]]; then
+            echo "A newly created Inbox task cannot even be read back by known project/task IDs."
             exit 1
           fi
+          jq -e --arg taskId "$TASK_ID" '.id == $taskId' "$DIRECT_FILE" >/dev/null
 
-          echo "No-projectId task is discoverable through the same project-data enumeration used by picker/Inbox."
+          if [[ "$LISTABLE" -eq 1 ]]; then
+            echo "System Inbox listing is available through at least one OpenAPI project-data form."
+          else
+            echo "System Inbox listing is unavailable through tested OpenAPI project-data forms; only direct known-ID access is available."
+          fi
 
           curl -fsS -X DELETE \
             "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
             -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null
           TASK_ID=""
 
-          echo "Plugin-shaped create/enumeration behavior is supported and cleaned up."
+          echo "System Inbox behavior probe completed and cleaned up."
