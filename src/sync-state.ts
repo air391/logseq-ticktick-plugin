@@ -1,11 +1,14 @@
 import { BlockEntity } from '@logseq/libs/dist/LSPlugin';
 import { TaskService } from './ticktick/ticktick';
 import { Task } from './ticktick/task';
+import { ManagedTaskSnapshot, parseSnapshot, serializeSnapshot } from './sync-conflict';
 
 export const TASK_ID_PROPERTY = 'remote-task-id';
 export const PROJECT_ID_PROPERTY = 'remote-project-id';
 export const SERVICE_PROPERTY = 'remote-task-service';
 export const TASK_URL_PROPERTY = 'remote-task-url';
+export const SYNC_BASELINE_PROPERTY = 'remote-sync-baseline';
+export const SYNC_CONFLICT_PROPERTY = 'remote-sync-conflict';
 
 export interface RemoteTaskMapping {
   taskId: string;
@@ -44,6 +47,28 @@ export const getRemoteTaskMapping = async (
     service,
     taskUrl: taskUrl || undefined,
   };
+};
+
+export const getSyncBaseline = async (
+  block: BlockEntity,
+): Promise<ManagedTaskSnapshot | null> => {
+  const properties = await logseq.Editor.getBlockProperties(block.uuid);
+  if (!properties) return null;
+  return parseSnapshot(readProperty(properties, SYNC_BASELINE_PROPERTY));
+};
+
+export const saveSyncBaseline = async (
+  block: BlockEntity,
+  snapshot: ManagedTaskSnapshot,
+): Promise<void> => {
+  await Promise.all([
+    logseq.Editor.upsertBlockProperty(block.uuid, SYNC_BASELINE_PROPERTY, serializeSnapshot(snapshot)),
+    logseq.Editor.removeBlockProperty(block.uuid, SYNC_CONFLICT_PROPERTY),
+  ]);
+};
+
+export const markSyncConflict = async (block: BlockEntity): Promise<void> => {
+  await logseq.Editor.upsertBlockProperty(block.uuid, SYNC_CONFLICT_PROPERTY, 'true');
 };
 
 export const findBlockBoundToRemoteTask = async (
@@ -119,5 +144,7 @@ export const removeRemoteTaskMapping = async (
     logseq.Editor.removeBlockProperty(block.uuid, PROJECT_ID_PROPERTY),
     logseq.Editor.removeBlockProperty(block.uuid, SERVICE_PROPERTY),
     logseq.Editor.removeBlockProperty(block.uuid, TASK_URL_PROPERTY),
+    logseq.Editor.removeBlockProperty(block.uuid, SYNC_BASELINE_PROPERTY),
+    logseq.Editor.removeBlockProperty(block.uuid, SYNC_CONFLICT_PROPERTY),
   ]);
 };
