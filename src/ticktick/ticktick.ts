@@ -176,6 +176,17 @@ class TickTick {
         );
     }
 
+    public async reopenTask(task: Task): Promise<Task> {
+        return this.updateTask({
+            ...task,
+            id: task.id,
+            projectId: task.projectId,
+            title: task.title,
+            status: 0,
+            completedTime: undefined,
+        });
+    }
+
     public async deleteTask(projectId: string, taskId: string): Promise<void> {
         await this.request<void>(
             `/project/${encodeURIComponent(projectId)}/task/${encodeURIComponent(taskId)}`,
