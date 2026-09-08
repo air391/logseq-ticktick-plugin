@@ -1,7 +1,7 @@
 import '@logseq/libs';
 import './index.css';
 import TickTick from './ticktick/ticktick';
-import { NewTask, Subtask, Task } from './ticktick/task';
+import { Subtask, Task } from './ticktick/task';
 import { logseq as PackageLogseq } from '../package.json';
 import { settingsSchema, getTickTickSettings } from './settings';
 import { BlockEntity } from '@logseq/libs/dist/LSPlugin';
@@ -13,39 +13,17 @@ import {
 } from './sync-state';
 import { openTaskPicker, TaskChoice } from './task-picker';
 import { refreshDidaInbox, removeInboxProjection } from './dida-inbox';
+import {
+  localStateToRemoteTask,
+  parseLocalTaskState,
+  remoteTaskToBlockContent,
+} from './task-state';
 
 const pluginId = PackageLogseq.id;
 const ticktick = new TickTick();
 const INBOX_REFRESH_INTERVAL_MS = 60_000;
 let inboxRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let inboxRefreshInFlight = false;
-
-const priorityToNum = (text: string): 0 | 1 | 3 | 5 => {
-  const priority = text.match(/\[#([A-C])\]/);
-  if (priority) {
-    switch (priority[1]) {
-      case 'A':
-        return 5;
-      case 'B':
-        return 3;
-      case 'C':
-        return 1;
-    }
-  }
-  return 0;
-};
-
-const parseTask = (text: string): NewTask => {
-  const priority = priorityToNum(text);
-  let title = text.replace(/\[#([A-C])\]/, '');
-  title = title.replace(/TODO/, '').replace(/DONE/, '').trim();
-
-  return {
-    title,
-    priority,
-    items: [],
-  };
-};
 
 const getTreeContent: (
   block: BlockEntity,
@@ -69,37 +47,94 @@ const flattenTree: (node: BlockEntity) => BlockEntity[] = (node) => {
   return result;
 };
 
-const syncTask = async (task: NewTask, block: BlockEntity): Promise<void> => {
+const subtaskTitle = (content: string): string =>
+  content
+    .replace(/^(TODO|DONE|DOING|NOW|LATER|WAITING)\s+/, '')
+    .replace(/\[#([A-C])\]\s*/, '')
+    .split('\n')[0]
+    .trim();
+
+const pushLocalTask = async (block: BlockEntity): Promise<void> => {
   const { service } = getTickTickSettings();
   const serviceName = service === 'dida' ? 'Dida365' : 'TickTick';
 
   try {
+    const contentTree = await getTreeContent(block);
+    if (!contentTree) throw new Error('Cannot get tree content from block entity');
+
+    const local = parseLocalTaskState(contentTree.content);
+    if (!local.title) {
+      await logseq.UI.showMsg('Task title cannot be empty.', 'warning', { timeout: 3000 });
+      return;
+    }
+
+    const flatTree = flattenTree(contentTree);
+    const subtasks: Subtask[] = flatTree
+      .slice(1)
+      .map((child) => ({ title: subtaskTitle(child.content) }))
+      .filter((item) => item.title.length > 0);
+
+    const payload = {
+      ...localStateToRemoteTask(local),
+      items: subtasks,
+    };
     const mapping = await getRemoteTaskMapping(block);
     let remoteTask: Task;
     let action: 'created' | 'updated';
 
     if (mapping && mapping.service === service) {
       remoteTask = await ticktick.updateTask({
-        ...task,
+        ...payload,
         id: mapping.taskId,
         projectId: mapping.projectId,
-        title: task.title,
+        title: payload.title,
+        status: local.marker === 'DONE' ? 1 : 0,
       });
       action = 'updated';
     } else {
-      remoteTask = await ticktick.createTask(task);
+      remoteTask = await ticktick.createTask(payload);
       action = 'created';
+    }
+
+    if (local.marker === 'DONE') {
+      await ticktick.completeTask(remoteTask.projectId, remoteTask.id);
+      remoteTask.status = 1;
     }
 
     await saveRemoteTaskMapping(block, service, remoteTask);
     await removeInboxProjection(remoteTask.id);
 
-    await logseq.UI.showMsg(`${serviceName} task ${action}.`, 'success', {
+    await logseq.UI.showMsg(`${serviceName} task ${action} from Logseq.`, 'success', {
       timeout: 3000,
     });
   } catch (error) {
     console.error(error);
     await logseq.UI.showMsg(`${serviceName} request failed. Check the access token and network connection.`, 'error', {
+      timeout: 4000,
+    });
+  }
+};
+
+const pullRemoteTask = async (block: BlockEntity): Promise<void> => {
+  const mapping = await getRemoteTaskMapping(block);
+  if (!mapping) {
+    await logseq.UI.showMsg('Current block is not linked to a remote task.', 'warning', {
+      timeout: 3000,
+    });
+    return;
+  }
+
+  try {
+    const remote = await ticktick.getTask(mapping.projectId, mapping.taskId);
+    const content = remoteTaskToBlockContent(remote, block.content);
+    await logseq.Editor.updateBlock(block.uuid, content);
+    await saveRemoteTaskMapping(block, mapping.service, remote);
+    await logseq.UI.showMsg('Remote task pulled into Logseq.', 'success', {
+      timeout: 3000,
+    });
+  } catch (error) {
+    console.error(error);
+    await logseq.UI.showMsg('Failed to pull the linked remote task.', 'error', {
       timeout: 4000,
     });
   }
@@ -135,11 +170,9 @@ const linkExistingTask = async (block: BlockEntity): Promise<void> => {
       await saveRemoteTaskMapping(block, service, choice.task);
       await removeInboxProjection(choice.task.id);
 
-      const normalized = block.content
-        .replace(/^(TODO|DONE|DOING|NOW|LATER|WAITING)\s+/, '')
-        .trim();
-      if (!normalized) {
-        await logseq.Editor.updateBlock(block.uuid, `TODO ${choice.task.title}`);
+      const local = parseLocalTaskState(block.content);
+      if (!local.title) {
+        await logseq.Editor.updateBlock(block.uuid, remoteTaskToBlockContent(choice.task, block.content));
       }
 
       await logseq.UI.showMsg(`${serviceName} task linked.`, 'success', {
@@ -261,31 +294,13 @@ const main: () => Promise<void> = async () => {
   }
 
   logseq.Editor.registerSlashCommand('Dida Create / Sync', async () => {
-    const blockEntity = await getCurrentBlockOrWarn();
-    if (!blockEntity) return;
+    const block = await getCurrentBlockOrWarn();
+    if (block) await pushLocalTask(block);
+  });
 
-    const contentTree = await getTreeContent(blockEntity);
-    if (!contentTree) {
-      console.error('Cannot get tree content from block entity');
-      return;
-    }
-
-    const flatContentTree = flattenTree(contentTree);
-    const subtasks: Subtask[] = flatContentTree.slice(1).map((child) => ({
-      title: child.content.replace(/TODO/, '').replace(/DONE/, '').replace(/\[#([A-C])\]/, '').trim(),
-    }));
-
-    const task = parseTask(flatContentTree[0]?.content || '');
-    task.items = subtasks;
-
-    if (task.title.length === 0) {
-      await logseq.UI.showMsg('Task title cannot be empty.', 'warning', {
-        timeout: 3000,
-      });
-      return;
-    }
-
-    await syncTask(task, flatContentTree[0]);
+  logseq.Editor.registerSlashCommand('Dida Pull Remote', async () => {
+    const block = await getCurrentBlockOrWarn();
+    if (block) await pullRemoteTask(block);
   });
 
   logseq.Editor.registerSlashCommand('Dida Link Existing', async () => {
@@ -305,16 +320,7 @@ const main: () => Promise<void> = async () => {
   // Preserve the original short command for existing users.
   logseq.Editor.registerSlashCommand('TT', async () => {
     const block = await getCurrentBlockOrWarn();
-    if (!block) return;
-    const contentTree = await getTreeContent(block);
-    if (!contentTree) return;
-    const flatContentTree = flattenTree(contentTree);
-    const task = parseTask(flatContentTree[0]?.content || '');
-    task.items = flatContentTree.slice(1).map((child) => ({
-      title: child.content.replace(/TODO/, '').replace(/DONE/, '').replace(/\[#([A-C])\]/, '').trim(),
-    }));
-    if (task.title.length === 0) return;
-    await syncTask(task, flatContentTree[0]);
+    if (block) await pushLocalTask(block);
   });
 
   configureInboxAutoRefresh();
