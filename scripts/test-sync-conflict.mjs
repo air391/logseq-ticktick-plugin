@@ -1,34 +1,44 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 
 const tempDir = mkdtempSync(join(tmpdir(), 'logseq-dida-sync-test-'));
-const bundlePath = join(tempDir, 'sync-conflict.mjs');
 
 try {
   execFileSync(
     'pnpm',
     [
       'exec',
-      'esbuild',
+      'tsc',
       'src/sync-conflict.ts',
-      '--bundle',
-      '--platform=node',
-      '--format=esm',
-      `--outfile=${bundlePath}`,
+      'src/task-state.ts',
+      'src/ticktick/task.ts',
+      '--target',
+      'ES2020',
+      '--module',
+      'commonjs',
+      '--moduleResolution',
+      'node',
+      '--skipLibCheck',
+      '--outDir',
+      tempDir,
     ],
     { stdio: 'inherit' },
   );
 
+  const require = createRequire(import.meta.url);
+  const directPath = join(tempDir, 'sync-conflict.js');
+  const nestedPath = join(tempDir, 'src', 'sync-conflict.js');
+  const compiledPath = existsSync(directPath) ? directPath : nestedPath;
   const {
     classifySyncState,
     parseSnapshot,
     snapshotFromLocalContent,
     snapshotFromRemoteTask,
-  } = await import(pathToFileURL(bundlePath).href);
+  } = require(compiledPath);
 
   const baseline = snapshotFromLocalContent('TODO Alpha', []);
   const sameLocal = snapshotFromLocalContent('TODO Alpha', []);
