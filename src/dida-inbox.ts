@@ -6,6 +6,14 @@ const INBOX_TASK_ID_PROPERTY = 'dida-inbox-task-id';
 const INBOX_PROJECT_ID_PROPERTY = 'dida-inbox-project-id';
 const INBOX_PROJECT_NAME_PROPERTY = 'dida-inbox-project-name';
 const INBOX_TASK_URL_PROPERTY = 'dida-inbox-task-url';
+const INBOX_MANAGED_CONTENT_PROPERTY = 'dida-inbox-managed-content';
+const INBOX_PROPERTIES = [
+  INBOX_TASK_ID_PROPERTY,
+  INBOX_PROJECT_ID_PROPERTY,
+  INBOX_PROJECT_NAME_PROPERTY,
+  INBOX_TASK_URL_PROPERTY,
+  INBOX_MANAGED_CONTENT_PROPERTY,
+];
 
 const findInboxProjection = async (taskId: string): Promise<BlockEntity | null> => {
   const query = `
@@ -49,6 +57,40 @@ const readInboxTaskId = async (block: BlockEntity): Promise<string> => {
   return typeof value === 'string' ? value : '';
 };
 
+const clearInboxProjectionProperties = async (block: BlockEntity): Promise<void> => {
+  await Promise.all(
+    INBOX_PROPERTIES.map((property) => logseq.Editor.removeBlockProperty(block.uuid, property)),
+  );
+};
+
+const retireInboxProjection = async (block: BlockEntity): Promise<void> => {
+  const fresh = await logseq.Editor.getBlock(block.uuid, { includeChildren: true });
+  if (!fresh) return;
+
+  const properties = await logseq.Editor.getBlockProperties(fresh.uuid);
+  const managedContent = properties?.[INBOX_MANAGED_CONTENT_PROPERTY];
+  const isKnownUntouched =
+    typeof managedContent === 'string' && fresh.content.trim() === managedContent.trim();
+  const hasChildren = (fresh.children || []).length > 0;
+
+  // Only delete a projection when we can prove it is still exactly the disposable
+  // block created by the plugin. Older projections and anything the user edited or
+  // annotated are preserved instead of risking silent note loss.
+  if (isKnownUntouched && !hasChildren) {
+    await logseq.Editor.removeBlock(fresh.uuid);
+    return;
+  }
+
+  await clearInboxProjectionProperties(fresh);
+
+  if (isKnownUntouched) {
+    const next = fresh.content.replace(/^TODO\s+/i, '').trim();
+    if (next && next !== fresh.content.trim()) {
+      await logseq.Editor.updateBlock(fresh.uuid, next);
+    }
+  }
+};
+
 const getOrCreateInboxPage = async (): Promise<PageEntity> => {
   const existing = await logseq.Editor.getPage(INBOX_PAGE_NAME);
   if (existing) return existing;
@@ -66,7 +108,8 @@ export const ensureInboxProjection = async (
   if (existing) return existing;
 
   const page = await getOrCreateInboxPage();
-  const block = await logseq.Editor.appendBlockInPage(page.uuid, `TODO ${task.title}`);
+  const managedContent = `TODO ${task.title}`;
+  const block = await logseq.Editor.appendBlockInPage(page.uuid, managedContent);
   if (!block) return null;
 
   await Promise.all([
@@ -74,6 +117,7 @@ export const ensureInboxProjection = async (
     logseq.Editor.upsertBlockProperty(block.uuid, INBOX_PROJECT_ID_PROPERTY, task.projectId),
     logseq.Editor.upsertBlockProperty(block.uuid, INBOX_PROJECT_NAME_PROPERTY, project.name),
     logseq.Editor.upsertBlockProperty(block.uuid, INBOX_TASK_URL_PROPERTY, task.taskUrl || ''),
+    logseq.Editor.upsertBlockProperty(block.uuid, INBOX_MANAGED_CONTENT_PROPERTY, managedContent),
   ]);
 
   return block;
@@ -82,7 +126,7 @@ export const ensureInboxProjection = async (
 export const removeInboxProjection = async (taskId: string): Promise<void> => {
   const block = await findInboxProjection(taskId);
   if (!block) return;
-  await logseq.Editor.removeBlock(block.uuid);
+  await retireInboxProjection(block);
 };
 
 export interface InboxRefreshResult {
@@ -102,7 +146,7 @@ export const refreshDidaInbox = async (
     const taskId = await readInboxTaskId(projection);
     if (!taskId) continue;
     if (!openTaskIds.has(taskId) || await isFormallyLinked(taskId)) {
-      await logseq.Editor.removeBlock(projection.uuid);
+      await retireInboxProjection(projection);
       removed += 1;
     }
   }
