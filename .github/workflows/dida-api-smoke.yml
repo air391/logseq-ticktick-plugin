@@ -181,7 +181,7 @@ jobs:
             echo "Open API did not reliably reopen the completed task; plugin will guard this operation."
           fi
 
-      - name: Verify plugin-shaped create request without projectId
+      - name: Verify plugin-shaped create request and enumeration without projectId
         shell: bash
         run: |
           set -euo pipefail
@@ -189,6 +189,18 @@ jobs:
           API_BASE="https://api.dida365.com/open/v1"
           TITLE="[logseq-plugin-shape-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           RESPONSE_FILE="$(mktemp)"
+          TASK_ID=""
+          PROJECT_ID=""
+
+          cleanup() {
+            if [[ -n "$TASK_ID" && -n "$PROJECT_ID" ]]; then
+              curl -fsS -X DELETE \
+                "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
+                -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
           STATUS="$(curl -sS -o "$RESPONSE_FILE" -w '%{http_code}' \
             -X POST "$API_BASE/task" \
             -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
@@ -211,8 +223,25 @@ jobs:
             exit 1
           fi
 
+          PROJECTS_JSON="$(curl -fsS "$API_BASE/project" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          if ! jq -e --arg projectId "$PROJECT_ID" 'any(.[]; .id == $projectId)' <<<"$PROJECTS_JSON" >/dev/null; then
+            echo "The project assigned by no-projectId create is missing from /project enumeration."
+            exit 1
+          fi
+
+          PROJECT_DATA="$(curl -fsS "$API_BASE/project/$PROJECT_ID/data" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          if ! jq -e --arg taskId "$TASK_ID" 'any(.tasks[]?; .id == $taskId)' <<<"$PROJECT_DATA" >/dev/null; then
+            echo "The no-projectId task is missing from the project-data enumeration used by the plugin."
+            exit 1
+          fi
+
+          echo "No-projectId task is discoverable through the same project-data enumeration used by picker/Inbox."
+
           curl -fsS -X DELETE \
             "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
             -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null
+          TASK_ID=""
 
-          echo "Plugin-shaped create request is supported and cleaned up."
+          echo "Plugin-shaped create/enumeration behavior is supported and cleaned up."
