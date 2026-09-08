@@ -1,0 +1,43 @@
+name: Package Plugin
+
+on:
+  push:
+    branches:
+      - ci/dida-api-smoke
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.9
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm build
+      - name: Assemble plugin package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p package/logseq-ticktick-plugin
+          cp -r dist package/logseq-ticktick-plugin/dist
+          cp package.json package/logseq-ticktick-plugin/package.json
+          cp logo.png package/logseq-ticktick-plugin/logo.png
+          cp readme.md package/logseq-ticktick-plugin/readme.md
+          cd package
+          zip -r ../logseq-ticktick-plugin.zip logseq-ticktick-plugin
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: logseq-ticktick-plugin
+          path: logseq-ticktick-plugin.zip
+          if-no-files-found: error
