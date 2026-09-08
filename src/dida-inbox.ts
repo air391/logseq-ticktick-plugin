@@ -16,7 +16,7 @@ const INBOX_PROPERTIES = [
   INBOX_MANAGED_CONTENT_PROPERTY,
 ];
 
-const projectionVisibleContent = (content: string): string => {
+export const projectionVisibleContent = (content: string): string => {
   const propertyPrefixes = INBOX_PROPERTIES.map((property) => `${property}::`);
   return content
     .split(/\r?\n/)
