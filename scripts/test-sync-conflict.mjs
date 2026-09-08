@@ -43,38 +43,22 @@ try {
   const baseline = snapshotFromLocalContent('TODO Alpha', []);
   const sameLocal = snapshotFromLocalContent('TODO Alpha', []);
   const sameRemote = snapshotFromRemoteTask({
-    id: 't1',
-    projectId: 'p1',
-    title: 'Alpha',
-    status: 0,
-    priority: 0,
-    items: [],
+    id: 't1', projectId: 'p1', title: 'Alpha', status: 0, priority: 0, items: [],
   });
-
   assert.equal(classifySyncState(baseline, sameLocal, sameRemote), 'unchanged');
 
   const localTitleChanged = snapshotFromLocalContent('TODO Alpha local', []);
   assert.equal(classifySyncState(baseline, localTitleChanged, sameRemote), 'keep-local');
 
   const remoteTitleChanged = snapshotFromRemoteTask({
-    id: 't1',
-    projectId: 'p1',
-    title: 'Alpha remote',
-    status: 0,
-    priority: 0,
-    items: [],
+    id: 't1', projectId: 'p1', title: 'Alpha remote', status: 0, priority: 0, items: [],
   });
   assert.equal(classifySyncState(baseline, sameLocal, remoteTitleChanged), 'pull-remote');
   assert.equal(classifySyncState(baseline, localTitleChanged, remoteTitleChanged), 'conflict');
 
   const convergedLocal = snapshotFromLocalContent('DONE Alpha final', []);
   const convergedRemote = snapshotFromRemoteTask({
-    id: 't1',
-    projectId: 'p1',
-    title: 'Alpha final',
-    status: 1,
-    priority: 0,
-    items: [],
+    id: 't1', projectId: 'p1', title: 'Alpha final', status: 1, priority: 0, items: [],
   });
   assert.equal(classifySyncState(baseline, convergedLocal, convergedRemote), 'converged');
 
@@ -107,7 +91,15 @@ try {
     'keep-local',
   );
 
-  const remoteChecklistAdded = snapshotFromRemoteTask({
+  const localChecklistDeleted = snapshotFromLocalContent('TODO Parent', [
+    { title: 'Child A', completed: false },
+  ]);
+  assert.equal(
+    classifySyncState(checklistBaseline, localChecklistDeleted, checklistRemoteBaseline),
+    'conflict',
+  );
+
+  const remoteChecklistAppended = snapshotFromRemoteTask({
     id: 't2',
     projectId: 'p1',
     title: 'Parent',
@@ -120,20 +112,62 @@ try {
     ],
   });
   assert.equal(
-    classifySyncState(checklistBaseline, checklistBaseline, remoteChecklistAdded),
+    classifySyncState(checklistBaseline, checklistBaseline, remoteChecklistAppended),
     'pull-remote',
   );
   assert.equal(
-    classifySyncState(checklistBaseline, localChecklistChanged, remoteChecklistAdded),
+    classifySyncState(checklistBaseline, localChecklistChanged, remoteChecklistAppended),
     'conflict',
   );
 
+  const remoteChecklistDeleted = snapshotFromRemoteTask({
+    id: 't2', projectId: 'p1', title: 'Parent', status: 0, priority: 0,
+    items: [{ title: 'Child A', status: 0 }],
+  });
+  assert.equal(
+    classifySyncState(checklistBaseline, checklistBaseline, remoteChecklistDeleted),
+    'conflict',
+  );
+
+  const remoteChecklistReordered = snapshotFromRemoteTask({
+    id: 't2', projectId: 'p1', title: 'Parent', status: 0, priority: 0,
+    items: [
+      { title: 'Child B', status: 0 },
+      { title: 'Child A', status: 0 },
+    ],
+  });
+  assert.equal(
+    classifySyncState(checklistBaseline, checklistBaseline, remoteChecklistReordered),
+    'conflict',
+  );
+
+  const remoteChecklistInsertedInMiddle = snapshotFromRemoteTask({
+    id: 't2', projectId: 'p1', title: 'Parent', status: 0, priority: 0,
+    items: [
+      { title: 'Child A', status: 0 },
+      { title: 'Inserted', status: 0 },
+      { title: 'Child B', status: 0 },
+    ],
+  });
+  assert.equal(
+    classifySyncState(checklistBaseline, checklistBaseline, remoteChecklistInsertedInMiddle),
+    'conflict',
+  );
+
+  const remoteChecklistStatusChanged = snapshotFromRemoteTask({
+    id: 't2', projectId: 'p1', title: 'Parent', status: 0, priority: 0,
+    items: [
+      { title: 'Child A', status: 1 },
+      { title: 'Child B', status: 0 },
+    ],
+  });
+  assert.equal(
+    classifySyncState(checklistBaseline, checklistBaseline, remoteChecklistStatusChanged),
+    'pull-remote',
+  );
+
   const legacyBaseline = JSON.stringify({
-    title: 'Legacy',
-    completed: false,
-    priority: 0,
-    startDate: null,
-    dueDate: null,
+    title: 'Legacy', completed: false, priority: 0, startDate: null, dueDate: null,
   });
   assert.deepEqual(parseSnapshot(legacyBaseline), {
     title: 'Legacy',
