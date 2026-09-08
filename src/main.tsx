@@ -24,6 +24,7 @@ import {
 } from './task-state';
 import {
   classifySyncState,
+  resolveConflictByTime,
   snapshotFromLocalContent,
   snapshotFromRemoteTask,
 } from './sync-conflict';
@@ -70,7 +71,11 @@ const subtaskTitle = (content: string): string =>
     .split(/\r?\n/)[0]
     .trim();
 
-const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<boolean> => {
+const pushLocalTask = async (
+  block: BlockEntity,
+  showMessage = true,
+  forceResolvedConflict = false,
+): Promise<boolean> => {
   const { service } = getTickTickSettings();
   const serviceName = service === 'dida' ? 'Dida365' : 'TickTick';
 
@@ -104,7 +109,7 @@ const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<bo
     if (mapping && mapping.service === service) {
       const currentRemote = await ticktick.getTask(mapping.projectId, mapping.taskId);
 
-      if (!showMessage) {
+      if (!showMessage && !forceResolvedConflict) {
         const baseline = await getSyncBaseline(contentTree);
         const localSnapshot = snapshotFromLocalContent(contentTree.content || '');
         const remoteSnapshot = snapshotFromRemoteTask(currentRemote);
@@ -298,9 +303,26 @@ const reconcileLinkedTasks = async (): Promise<void> => {
         suppressLocalPush(latest.uuid);
         await saveSyncBaseline(latest, remoteSnapshot);
       } else if (decision === 'conflict') {
-        suppressLocalPush(latest.uuid);
-        await markSyncConflict(latest);
-        console.warn(`Dida sync conflict for block ${latest.uuid} / task ${mapping.taskId}`);
+        if (!baseline) {
+          suppressLocalPush(latest.uuid);
+          await markSyncConflict(latest);
+          console.warn(`Dida sync needs an explicit first resolution for block ${latest.uuid} / task ${mapping.taskId}`);
+          continue;
+        }
+
+        const winner = resolveConflictByTime(latest.updatedAt, remote);
+        if (winner === 'remote') {
+          await applyRemoteTaskToBlock(latest, remote);
+          suppressLocalPush(latest.uuid);
+          await saveRemoteTaskMapping(latest, mapping.service, remote);
+          await saveSyncBaseline(latest, remoteSnapshot);
+        } else if (winner === 'local') {
+          await pushLocalTask(latest, false, true);
+        } else {
+          suppressLocalPush(latest.uuid);
+          await markSyncConflict(latest);
+          console.warn(`Dida sync conflict for block ${latest.uuid} / task ${mapping.taskId}`);
+        }
       }
     } catch (error) {
       if (isTaskNotFoundError(error)) {
