@@ -134,9 +134,9 @@ class TickTick {
         return this.request<ProjectData>(`/project/${encodeURIComponent(projectId)}/data`);
     }
 
-    public async getOpenTasks(): Promise<Array<{ project: Project; task: Task }>> {
+    private async getOpenTaskSources(): Promise<ProjectData[]> {
         const projects = await this.getProjects();
-        const projectData = await Promise.all(
+        const sources = await Promise.all(
             projects.map(async (project) => {
                 try {
                     return await this.getProjectData(project.id);
@@ -147,14 +147,33 @@ class TickTick {
             }),
         );
 
+        const available = sources.filter((source): source is ProjectData => source !== null);
+
+        if (this.service === 'dida') {
+            try {
+                // Dida's system Inbox is a real project-data source, but it is not
+                // returned by GET /project. Real API tests verify that the literal
+                // `inbox` alias lists the same tasks created without a projectId.
+                available.push(await this.getProjectData('inbox'));
+            } catch (error) {
+                console.warn('Failed to load Dida system Inbox', error);
+            }
+        }
+
+        return available;
+    }
+
+    public async getOpenTasks(): Promise<Array<{ project: Project; task: Task }>> {
+        const sources = await this.getOpenTaskSources();
         const tasks: Array<{ project: Project; task: Task }> = [];
-        for (let i = 0; i < projects.length; i += 1) {
-            const data = projectData[i];
-            if (!data) continue;
+        const seenTaskIds = new Set<string>();
+
+        for (const data of sources) {
             for (const task of data.tasks || []) {
-                if (task.status === 1 || task.completedTime) continue;
+                if (task.status === 1 || task.completedTime || seenTaskIds.has(task.id)) continue;
+                seenTaskIds.add(task.id);
                 tasks.push({
-                    project: projects[i],
+                    project: data.project,
                     task: this.withTaskUrl(task),
                 });
             }
