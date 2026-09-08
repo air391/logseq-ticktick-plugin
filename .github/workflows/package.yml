@@ -66,6 +66,7 @@ jobs:
           for command in \
             'Dida Create / Sync' \
             'Dida Pull Remote' \
+            'Dida Pull All Linked' \
             'Dida Link Existing' \
             'Dida Refresh Inbox' \
             'Dida Resolve Conflict - Keep Logseq' \
