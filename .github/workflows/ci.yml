@@ -24,3 +24,4 @@ jobs:
           version: 8.15.9
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm build
+      - run: node scripts/test-sync-conflict.mjs
