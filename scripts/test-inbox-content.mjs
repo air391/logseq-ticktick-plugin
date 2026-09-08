@@ -13,9 +13,7 @@ try {
     [
       'exec',
       'tsc',
-      'src/dida-inbox.ts',
-      'src/property-query.ts',
-      'src/ticktick/task.ts',
+      'src/inbox-content.ts',
       '--target',
       'ES2020',
       '--module',
@@ -30,8 +28,8 @@ try {
   );
 
   const require = createRequire(import.meta.url);
-  const directPath = join(tempDir, 'dida-inbox.js');
-  const nestedPath = join(tempDir, 'src', 'dida-inbox.js');
+  const directPath = join(tempDir, 'inbox-content.js');
+  const nestedPath = join(tempDir, 'src', 'inbox-content.js');
   const compiledPath = existsSync(directPath) ? directPath : nestedPath;
   const { projectionVisibleContent } = require(compiledPath);
 
