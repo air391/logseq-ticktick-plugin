@@ -1,6 +1,6 @@
 import '@logseq/libs';
 import './index.css';
-import TickTick from './ticktick/ticktick';
+import TickTick, { isTaskNotFoundError } from './ticktick/ticktick';
 import { Subtask, Task } from './ticktick/task';
 import { logseq as PackageLogseq } from '../package.json';
 import { settingsSchema, getTickTickSettings } from './settings';
@@ -192,6 +192,12 @@ const applyRemoteTaskToBlock = async (block: BlockEntity, remote: Task): Promise
   return true;
 };
 
+const detachDeletedRemoteTask = async (block: BlockEntity): Promise<void> => {
+  suppressLocalPush(block.uuid);
+  await removeRemoteTaskMapping(block);
+  console.info(`Detached block ${block.uuid} because its remote task no longer exists`);
+};
+
 const pullRemoteTask = async (block: BlockEntity): Promise<void> => {
   const mapping = await getRemoteTaskMapping(block);
   if (!mapping) {
@@ -211,6 +217,13 @@ const pullRemoteTask = async (block: BlockEntity): Promise<void> => {
       timeout: 3000,
     });
   } catch (error) {
+    if (isTaskNotFoundError(error)) {
+      await detachDeletedRemoteTask(block);
+      await logseq.UI.showMsg('Remote task was deleted. The Logseq block was kept and unlinked.', 'warning', {
+        timeout: 5000,
+      });
+      return;
+    }
     console.error(error);
     await logseq.UI.showMsg('Failed to pull the linked remote task.', 'error', {
       timeout: 4000,
@@ -225,6 +238,7 @@ const pullAllLinkedTasks = async (showMessage = false): Promise<void> => {
   const bindings = await listRemoteTaskBindings();
   let updated = 0;
   let failed = 0;
+  let detached = 0;
 
   for (const { block, mapping } of bindings) {
     if (mapping.service !== service) continue;
@@ -237,6 +251,11 @@ const pullAllLinkedTasks = async (showMessage = false): Promise<void> => {
       await saveRemoteTaskMapping(latest, mapping.service, remote);
       await saveSyncBaseline(latest, snapshotFromRemoteTask(remote));
     } catch (error) {
+      if (isTaskNotFoundError(error)) {
+        await detachDeletedRemoteTask(block);
+        detached += 1;
+        continue;
+      }
       failed += 1;
       console.warn(`Failed to pull linked task ${mapping.taskId}`, error);
     }
@@ -244,7 +263,7 @@ const pullAllLinkedTasks = async (showMessage = false): Promise<void> => {
 
   if (showMessage) {
     await logseq.UI.showMsg(
-      `Linked tasks pulled. ${updated} updated${failed ? `, ${failed} failed` : ''}.`,
+      `Linked tasks pulled. ${updated} updated${detached ? `, ${detached} detached` : ''}${failed ? `, ${failed} failed` : ''}.`,
       failed ? 'warning' : 'success',
       { timeout: 3500 },
     );
@@ -284,6 +303,10 @@ const reconcileLinkedTasks = async (): Promise<void> => {
         console.warn(`Dida sync conflict for block ${latest.uuid} / task ${mapping.taskId}`);
       }
     } catch (error) {
+      if (isTaskNotFoundError(error)) {
+        await detachDeletedRemoteTask(block);
+        continue;
+      }
       console.warn(`Failed to reconcile linked task ${mapping.taskId}`, error);
     }
   }
