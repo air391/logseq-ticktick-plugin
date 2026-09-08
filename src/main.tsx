@@ -145,7 +145,7 @@ const applyRemoteChecklistToBlock = async (
     const inserted = await logseq.Editor.insertBlock(
       block.uuid,
       `${marker} ${remoteItem.title}`,
-      { sibling: false, end: true },
+      { sibling: false, before: false },
     );
     if (inserted) {
       suppressLocalPush(inserted.uuid);
