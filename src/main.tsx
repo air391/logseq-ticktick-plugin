@@ -23,8 +23,25 @@ import {
 const pluginId = PackageLogseq.id;
 const ticktick = new TickTick();
 const REFRESH_INTERVAL_MS = 60_000;
+const LOCAL_PUSH_DEBOUNCE_MS = 3_000;
+const REMOTE_WRITE_SUPPRESSION_MS = 5_000;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let refreshInFlight = false;
+const localPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const remoteWriteUntil = new Map<string, number>();
+
+const suppressLocalPush = (uuid: string): void => {
+  remoteWriteUntil.set(uuid, Date.now() + REMOTE_WRITE_SUPPRESSION_MS);
+};
+
+const localPushIsSuppressed = (uuid: string): boolean => {
+  const until = remoteWriteUntil.get(uuid) || 0;
+  if (until <= Date.now()) {
+    remoteWriteUntil.delete(uuid);
+    return false;
+  }
+  return true;
+};
 
 const getTreeContent = async (block: BlockEntity): Promise<BlockEntity | null> => {
   return logseq.Editor.getBlock(block.uuid, { includeChildren: true });
@@ -45,7 +62,7 @@ const subtaskTitle = (content: string): string =>
     .split(/\r?\n/)[0]
     .trim();
 
-const pushLocalTask = async (block: BlockEntity): Promise<void> => {
+const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<void> => {
   const { service } = getTickTickSettings();
   const serviceName = service === 'dida' ? 'Dida365' : 'TickTick';
 
@@ -55,7 +72,7 @@ const pushLocalTask = async (block: BlockEntity): Promise<void> => {
 
     const local = parseLocalTaskState(contentTree.content || '');
     if (!local.title) {
-      await logseq.UI.showMsg('Task title cannot be empty.', 'warning', { timeout: 3000 });
+      if (showMessage) await logseq.UI.showMsg('Task title cannot be empty.', 'warning', { timeout: 3000 });
       return;
     }
 
@@ -80,11 +97,15 @@ const pushLocalTask = async (block: BlockEntity): Promise<void> => {
       const currentRemote = await ticktick.getTask(mapping.projectId, mapping.taskId);
       const remoteCompleted = currentRemote.status === 1 || Boolean(currentRemote.completedTime);
       if (remoteCompleted && local.marker !== 'DONE') {
-        await logseq.UI.showMsg(
-          'The Dida task is already completed. Dida Open API cannot reliably reopen it; reopen it in Dida first or pull the remote state.',
-          'warning',
-          { timeout: 6000 },
-        );
+        if (showMessage) {
+          await logseq.UI.showMsg(
+            'The Dida task is already completed. Dida Open API cannot reliably reopen it; reopen it in Dida first or pull the remote state.',
+            'warning',
+            { timeout: 6000 },
+          );
+        } else {
+          console.warn(`Skipped automatic reopen for completed Dida task ${mapping.taskId}`);
+        }
         return;
       }
 
@@ -106,17 +127,22 @@ const pushLocalTask = async (block: BlockEntity): Promise<void> => {
       remoteTask.status = 1;
     }
 
+    suppressLocalPush(block.uuid);
     await saveRemoteTaskMapping(block, service, remoteTask);
     await removeInboxProjection(remoteTask.id);
 
-    await logseq.UI.showMsg(`${serviceName} task ${action} from Logseq.`, 'success', {
-      timeout: 3000,
-    });
+    if (showMessage) {
+      await logseq.UI.showMsg(`${serviceName} task ${action} from Logseq.`, 'success', {
+        timeout: 3000,
+      });
+    }
   } catch (error) {
     console.error(error);
-    await logseq.UI.showMsg(`${serviceName} request failed. Check the access token and network connection.`, 'error', {
-      timeout: 4000,
-    });
+    if (showMessage) {
+      await logseq.UI.showMsg(`${serviceName} request failed. Check the access token and network connection.`, 'error', {
+        timeout: 4000,
+      });
+    }
   }
 };
 
@@ -124,6 +150,7 @@ const applyRemoteTaskToBlock = async (block: BlockEntity, remote: Task): Promise
   const current = block.content || '';
   const next = remoteTaskToBlockContent(remote, current);
   if (next === current.trim()) return false;
+  suppressLocalPush(block.uuid);
   await logseq.Editor.updateBlock(block.uuid, next);
   return true;
 };
@@ -140,6 +167,7 @@ const pullRemoteTask = async (block: BlockEntity): Promise<void> => {
   try {
     const remote = await ticktick.getTask(mapping.projectId, mapping.taskId);
     await applyRemoteTaskToBlock(block, remote);
+    suppressLocalPush(block.uuid);
     await saveRemoteTaskMapping(block, mapping.service, remote);
     await logseq.UI.showMsg('Remote task pulled into Logseq.', 'success', {
       timeout: 3000,
@@ -165,6 +193,7 @@ const pullAllLinkedTasks = async (showMessage = false): Promise<void> => {
     try {
       const remote = await ticktick.getTask(mapping.projectId, mapping.taskId);
       if (await applyRemoteTaskToBlock(block, remote)) updated += 1;
+      suppressLocalPush(block.uuid);
       await saveRemoteTaskMapping(block, mapping.service, remote);
     } catch (error) {
       failed += 1;
@@ -208,11 +237,13 @@ const linkExistingTask = async (block: BlockEntity): Promise<void> => {
         throw new Error(`Task is already linked to block ${alreadyLinked.uuid}`);
       }
 
+      suppressLocalPush(block.uuid);
       await saveRemoteTaskMapping(block, service, choice.task);
       await removeInboxProjection(choice.task.id);
 
       const local = parseLocalTaskState(block.content || '');
       if (!local.title) {
+        suppressLocalPush(block.uuid);
         await logseq.Editor.updateBlock(block.uuid, remoteTaskToBlockContent(choice.task, block.content || ''));
       }
 
@@ -237,6 +268,7 @@ const unlinkCurrentTask = async (block: BlockEntity): Promise<void> => {
     return;
   }
 
+  suppressLocalPush(block.uuid);
   await removeRemoteTaskMapping(block);
   await logseq.UI.showMsg('Remote task link removed. The Dida task was not deleted.', 'success', {
     timeout: 3000,
@@ -294,6 +326,27 @@ const configureAutoRefresh = (): void => {
   }, REFRESH_INTERVAL_MS);
 };
 
+const scheduleAutomaticPush = (block: BlockEntity): void => {
+  if (localPushIsSuppressed(block.uuid)) return;
+
+  const existing = localPushTimers.get(block.uuid);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(() => {
+    localPushTimers.delete(block.uuid);
+    void (async () => {
+      if (localPushIsSuppressed(block.uuid)) return;
+      const latest = await logseq.Editor.getBlock(block.uuid);
+      if (!latest) return;
+      const mapping = await getRemoteTaskMapping(latest);
+      if (!mapping) return;
+      await pushLocalTask(latest, false);
+    })();
+  }, LOCAL_PUSH_DEBOUNCE_MS);
+
+  localPushTimers.set(block.uuid, timer);
+};
+
 const getCurrentBlockOrWarn = async (): Promise<BlockEntity | null> => {
   const block = await logseq.Editor.getCurrentBlock();
   if (!block) {
@@ -334,6 +387,10 @@ const main = async (): Promise<void> => {
     });
   }
 
+  logseq.DB.onChanged(({ blocks }) => {
+    for (const block of blocks || []) scheduleAutomaticPush(block);
+  });
+
   logseq.Editor.registerSlashCommand('Dida Create / Sync', async () => {
     const block = await getCurrentBlockOrWarn();
     if (block) await pushLocalTask(block);
@@ -371,6 +428,8 @@ const main = async (): Promise<void> => {
   configureAutoRefresh();
   window.addEventListener('beforeunload', () => {
     if (refreshTimer) clearInterval(refreshTimer);
+    for (const timer of localPushTimers.values()) clearTimeout(timer);
+    localPushTimers.clear();
   });
 };
 
