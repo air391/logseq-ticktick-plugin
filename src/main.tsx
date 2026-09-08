@@ -29,6 +29,7 @@ import {
   snapshotFromLocalContent,
   snapshotFromRemoteTask,
 } from './sync-conflict';
+import { planChecklistApply } from './checklist-plan';
 
 const pluginId = PackageLogseq.id;
 const ticktick = new TickTick();
@@ -91,6 +92,12 @@ const subtasksFromLocalTree = (block: BlockEntity): Subtask[] =>
       status: item.completed ? 1 : 0,
     }));
 
+const checklistTitlesFromTree = (block: BlockEntity): string[] =>
+  managedChecklistChildren(block).map((child) => subtaskTitle(child.content || ''));
+
+const remoteChecklistTitles = (remote: Task): string[] =>
+  (remote.items || []).map((item) => item.title || '');
+
 const updateChecklistBlockFromRemote = async (
   block: BlockEntity,
   item: Subtask,
@@ -110,6 +117,17 @@ const updateChecklistBlockFromRemote = async (
   return true;
 };
 
+const demoteChecklistBlock = async (block: BlockEntity): Promise<boolean> => {
+  const current = block.content || '';
+  const lines = current.split(/\r?\n/);
+  const firstLine = (lines[0] || '').replace(TASK_MARKER_RE, '').trim();
+  const next = [firstLine, ...lines.slice(1)].join('\n').trim();
+  if (next === current.trim()) return false;
+  suppressLocalPush(block.uuid);
+  await logseq.Editor.updateBlock(block.uuid, next);
+  return true;
+};
+
 interface ChecklistApplyResult {
   changed: boolean;
   blockedDeletion: boolean;
@@ -118,20 +136,47 @@ interface ChecklistApplyResult {
 const applyRemoteChecklistToBlock = async (
   block: BlockEntity,
   remote: Task,
+  forceStructural = false,
 ): Promise<ChecklistApplyResult> => {
   const tree = await getTreeContent(block);
   if (!tree) return { changed: false, blockedDeletion: false };
 
   const localChildren = managedChecklistChildren(tree);
   const remoteItems = remote.items || [];
+  const plan = planChecklistApply(
+    localChildren.map((child) => subtaskTitle(child.content || '')),
+    remoteItems.map((item) => item.title || ''),
+  );
 
-  // Remote checklist deletion is deliberately not mirrored automatically because
-  // a Logseq child may contain nested notes or other valuable local context.
-  if (remoteItems.length < localChildren.length) {
+  if (plan === 'rebuild' && !forceStructural) {
     return { changed: false, blockedDeletion: true };
   }
 
   let changed = false;
+  if (plan === 'rebuild') {
+    // Explicit remote-wins resolution preserves every existing Logseq child block
+    // and nested note. Removed/reordered checklist blocks become ordinary context,
+    // then the authoritative remote checklist is appended as fresh task blocks.
+    for (const localChild of localChildren) {
+      if (await demoteChecklistBlock(localChild)) changed = true;
+    }
+
+    for (const remoteItem of remoteItems) {
+      const marker = remoteItem.status === 1 || remoteItem.completedTime ? 'DONE' : 'TODO';
+      suppressLocalPush(block.uuid);
+      const inserted = await logseq.Editor.insertBlock(
+        block.uuid,
+        `${marker} ${remoteItem.title}`,
+        { sibling: false, before: false },
+      );
+      if (inserted) {
+        suppressLocalPush(inserted.uuid);
+        changed = true;
+      }
+    }
+    return { changed, blockedDeletion: false };
+  }
+
   for (let index = 0; index < remoteItems.length; index += 1) {
     const remoteItem = remoteItems[index];
     const localChild = localChildren[index];
@@ -164,8 +209,23 @@ interface RemoteApplyResult {
 const applyRemoteTaskToBlock = async (
   block: BlockEntity,
   remote: Task,
+  forceStructural = false,
 ): Promise<RemoteApplyResult> => {
-  const current = block.content || '';
+  const tree = await getTreeContent(block);
+  if (!tree) return { changed: false, blockedChecklistDeletion: false };
+
+  // Preflight the checklist before touching the parent block. This prevents a
+  // conflict from partially applying parent fields before a structural checklist
+  // problem is discovered.
+  const checklistPlan = planChecklistApply(
+    checklistTitlesFromTree(tree),
+    remoteChecklistTitles(remote),
+  );
+  if (checklistPlan === 'rebuild' && !forceStructural) {
+    return { changed: false, blockedChecklistDeletion: true };
+  }
+
+  const current = tree.content || '';
   const next = remoteTaskToBlockContent(remote, current);
   let changed = false;
   if (next !== current.trim()) {
@@ -174,7 +234,7 @@ const applyRemoteTaskToBlock = async (
     changed = true;
   }
 
-  const checklist = await applyRemoteChecklistToBlock(block, remote);
+  const checklist = await applyRemoteChecklistToBlock(block, remote, forceStructural);
   return {
     changed: changed || checklist.changed,
     blockedChecklistDeletion: checklist.blockedDeletion,
@@ -294,7 +354,7 @@ const detachDeletedRemoteTask = async (block: BlockEntity): Promise<void> => {
   console.info(`Detached block ${block.uuid} because its remote task no longer exists`);
 };
 
-const pullRemoteTask = async (block: BlockEntity): Promise<void> => {
+const pullRemoteTask = async (block: BlockEntity, forceRemote = false): Promise<void> => {
   const mapping = await getRemoteTaskMapping(block);
   if (!mapping) {
     await logseq.UI.showMsg('Current block is not linked to a remote task.', 'warning', {
@@ -304,25 +364,59 @@ const pullRemoteTask = async (block: BlockEntity): Promise<void> => {
   }
 
   try {
+    const latest = await getTreeContent(block);
+    if (!latest) throw new Error('Cannot load current Logseq block');
     const remote = await ticktick.getTask(mapping.projectId, mapping.taskId);
-    const result = await applyRemoteTaskToBlock(block, remote);
+    const remoteSnapshot = snapshotFromRemoteTask(remote);
+
+    if (!forceRemote) {
+      const baseline = await getSyncBaseline(latest);
+      const localSnapshot = snapshotFromLocalTree(latest);
+      const decision = classifySyncState(baseline, localSnapshot, remoteSnapshot);
+
+      if (decision === 'keep-local' || decision === 'conflict') {
+        suppressLocalPush(latest.uuid);
+        await markSyncConflict(latest);
+        await logseq.UI.showMsg(
+          decision === 'keep-local'
+            ? 'Logseq has unsynchronized local changes. Pull was blocked; use a conflict-resolution command if you want to discard them.'
+            : 'Both sides changed or the remote checklist changed structurally. Pull was blocked before any local data was overwritten.',
+          'warning',
+          { timeout: 6500 },
+        );
+        return;
+      }
+
+      if (decision === 'unchanged' || decision === 'converged') {
+        if (decision === 'converged') {
+          suppressLocalPush(latest.uuid);
+          await saveSyncBaseline(latest, remoteSnapshot);
+        }
+        await logseq.UI.showMsg('Linked task is already synchronized.', 'success', { timeout: 3000 });
+        return;
+      }
+    }
+
+    const result = await applyRemoteTaskToBlock(latest, remote, forceRemote);
     if (result.blockedChecklistDeletion) {
-      suppressLocalPush(block.uuid);
-      await markSyncConflict(block);
+      suppressLocalPush(latest.uuid);
+      await markSyncConflict(latest);
       await logseq.UI.showMsg(
-        'Dida has fewer checklist items than Logseq. Local child blocks were kept; resolve this deletion conflict manually.',
+        'Remote checklist structure cannot be applied safely without explicit conflict resolution. No local fields were changed.',
         'warning',
-        { timeout: 6000 },
+        { timeout: 6500 },
       );
       return;
     }
 
-    suppressLocalPush(block.uuid);
-    await saveRemoteTaskMapping(block, mapping.service, remote);
-    await saveSyncBaseline(block, snapshotFromRemoteTask(remote));
-    await logseq.UI.showMsg('Remote task pulled into Logseq.', 'success', {
-      timeout: 3000,
-    });
+    suppressLocalPush(latest.uuid);
+    await saveRemoteTaskMapping(latest, mapping.service, remote);
+    await saveSyncBaseline(latest, remoteSnapshot);
+    await logseq.UI.showMsg(
+      forceRemote ? 'Conflict resolved using the remote Dida state.' : 'Remote task pulled into Logseq.',
+      'success',
+      { timeout: 3500 },
+    );
   } catch (error) {
     if (isTaskNotFoundError(error)) {
       await detachDeletedRemoteTask(block);
@@ -347,24 +441,41 @@ const pullAllLinkedTasks = async (showMessage = false): Promise<void> => {
   let failed = 0;
   let detached = 0;
   let conflicts = 0;
+  let localOnly = 0;
 
   for (const { block, mapping } of bindings) {
     if (mapping.service !== service) continue;
     try {
-      const latest = await logseq.Editor.getBlock(block.uuid);
+      const latest = await getTreeContent(block);
       if (!latest) continue;
       const remote = await ticktick.getTask(mapping.projectId, mapping.taskId);
-      const result = await applyRemoteTaskToBlock(latest, remote);
-      if (result.blockedChecklistDeletion) {
+      const baseline = await getSyncBaseline(latest);
+      const localSnapshot = snapshotFromLocalTree(latest);
+      const remoteSnapshot = snapshotFromRemoteTask(remote);
+      const decision = classifySyncState(baseline, localSnapshot, remoteSnapshot);
+
+      if (decision === 'pull-remote') {
+        const result = await applyRemoteTaskToBlock(latest, remote);
+        if (result.blockedChecklistDeletion) {
+          suppressLocalPush(latest.uuid);
+          await markSyncConflict(latest);
+          conflicts += 1;
+          continue;
+        }
+        if (result.changed) updated += 1;
+        suppressLocalPush(latest.uuid);
+        await saveRemoteTaskMapping(latest, mapping.service, remote);
+        await saveSyncBaseline(latest, remoteSnapshot);
+      } else if (decision === 'converged') {
+        suppressLocalPush(latest.uuid);
+        await saveSyncBaseline(latest, remoteSnapshot);
+      } else if (decision === 'keep-local') {
+        localOnly += 1;
+      } else if (decision === 'conflict') {
         suppressLocalPush(latest.uuid);
         await markSyncConflict(latest);
         conflicts += 1;
-        continue;
       }
-      if (result.changed) updated += 1;
-      suppressLocalPush(latest.uuid);
-      await saveRemoteTaskMapping(latest, mapping.service, remote);
-      await saveSyncBaseline(latest, snapshotFromRemoteTask(remote));
     } catch (error) {
       if (isTaskNotFoundError(error)) {
         await detachDeletedRemoteTask(block);
@@ -378,9 +489,9 @@ const pullAllLinkedTasks = async (showMessage = false): Promise<void> => {
 
   if (showMessage) {
     await logseq.UI.showMsg(
-      `Linked tasks pulled. ${updated} updated${detached ? `, ${detached} detached` : ''}${conflicts ? `, ${conflicts} conflicts` : ''}${failed ? `, ${failed} failed` : ''}.`,
+      `Linked tasks pulled. ${updated} updated${localOnly ? `, ${localOnly} kept local` : ''}${detached ? `, ${detached} detached` : ''}${conflicts ? `, ${conflicts} conflicts` : ''}${failed ? `, ${failed} failed` : ''}.`,
       failed || conflicts ? 'warning' : 'success',
-      { timeout: 4000 },
+      { timeout: 4500 },
     );
   }
 };
@@ -686,7 +797,7 @@ const main = async (): Promise<void> => {
 
   logseq.Editor.registerSlashCommand('Dida Resolve Conflict - Use Dida', async () => {
     const block = await getCurrentBlockOrWarn();
-    if (block) await pullRemoteTask(block);
+    if (block) await pullRemoteTask(block, true);
   });
 
   // Preserve the original short command for existing users.
