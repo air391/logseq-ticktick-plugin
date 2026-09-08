@@ -1,9 +1,10 @@
 import '@logseq/libs';
 import TickTick from './ticktick/ticktick';
-import { NewTask, Subtask } from './ticktick/task';
+import { NewTask, Subtask, Task } from './ticktick/task';
 import { logseq as PackageLogseq } from '../package.json';
 import { settingsSchema, getTickTickSettings } from './settings';
 import { BlockEntity } from '@logseq/libs/dist/LSPlugin';
+import { getRemoteTaskMapping, saveRemoteTaskMapping } from './sync-state';
 
 const pluginId = PackageLogseq.id;
 const ticktick = new TickTick();
@@ -23,22 +24,10 @@ const priorityToNum = (text: string): 0 | 1 | 3 | 5 => {
   return 0;
 };
 
-const priorityToTag = (priority: 0 | 1 | 3 | 5 | undefined): string => {
-  switch (priority) {
-    case 5:
-      return '[#A] ';
-    case 3:
-      return '[#B] ';
-    case 1:
-      return '[#C] ';
-  }
-  return '';
-};
-
 const parseTask = (text: string): NewTask => {
   const priority = priorityToNum(text);
   let title = text.replace(/\[#([A-C])\]/, '');
-  title = title.replace(/TODO/, '').trim();
+  title = title.replace(/TODO/, '').replace(/DONE/, '').trim();
 
   return {
     title,
@@ -69,21 +58,35 @@ const flattenTree: (node: BlockEntity) => BlockEntity[] = (node) => {
   return result;
 };
 
-const createTask: (task: NewTask, block: BlockEntity) => Promise<void> = async (
-  task,
-  block,
-) => {
+const syncTask = async (task: NewTask, block: BlockEntity): Promise<void> => {
+  const { service } = getTickTickSettings();
+  const serviceName = service === 'dida' ? 'Dida365' : 'TickTick';
+
   try {
-    const newTask = await ticktick.createTask(task);
-    const taskUrl = newTask.taskUrl || '';
-    await logseq.Editor.updateBlock(
-      block.uuid,
-      `TODO ${priorityToTag(newTask.priority)}[${newTask.title}](${taskUrl})`,
-    );
+    const mapping = await getRemoteTaskMapping(block);
+    let remoteTask: Task;
+    let action: 'created' | 'updated';
+
+    if (mapping && mapping.service === service) {
+      remoteTask = await ticktick.updateTask({
+        ...task,
+        id: mapping.taskId,
+        projectId: mapping.projectId,
+        title: task.title,
+      });
+      action = 'updated';
+    } else {
+      remoteTask = await ticktick.createTask(task);
+      action = 'created';
+    }
+
+    await saveRemoteTaskMapping(block, service, remoteTask);
+
+    await logseq.UI.showMsg(`${serviceName} task ${action}.`, 'success', {
+      timeout: 3000,
+    });
   } catch (error) {
     console.error(error);
-    const { service } = getTickTickSettings();
-    const serviceName = service === 'dida' ? 'Dida365' : 'TickTick';
     await logseq.UI.showMsg(`${serviceName} request failed. Check the access token and network connection.`, 'error', {
       timeout: 4000,
     });
@@ -135,7 +138,7 @@ const main: () => Promise<void> = async () => {
     const flatContentTree = flattenTree(contentTree);
 
     const subtasks: Subtask[] = flatContentTree.slice(1).map((child) => ({
-      title: child.content.replace(/TODO/, '').replace(/\[#([A-C])\]/, '').trim(),
+      title: child.content.replace(/TODO/, '').replace(/DONE/, '').replace(/\[#([A-C])\]/, '').trim(),
     }));
 
     const task = parseTask(flatContentTree[0]?.content || '');
@@ -148,7 +151,7 @@ const main: () => Promise<void> = async () => {
       return;
     }
 
-    await createTask(task, flatContentTree[0]);
+    await syncTask(task, flatContentTree[0]);
   });
 };
 
