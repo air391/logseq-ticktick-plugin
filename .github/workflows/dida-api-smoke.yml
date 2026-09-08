@@ -128,7 +128,7 @@ jobs:
 
           echo "Dida real API CRUD smoke test passed."
 
-      - name: Verify date update and reopen semantics
+      - name: Verify date update and probe reopen behavior
         shell: bash
         run: |
           set -euo pipefail
@@ -160,7 +160,8 @@ jobs:
             --data "$(jq -nc --arg id "$TASK_ID" --arg projectId "$PROJECT_ID" --arg title "$TITLE" --arg startDate "$START_DATE" --arg dueDate "$DUE_DATE" '{id:$id,projectId:$projectId,title:$title,startDate:$startDate,dueDate:$dueDate,status:0}')" >/dev/null
 
           DATE_GET="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
-          jq -e --arg startDate "$START_DATE" --arg dueDate "$DUE_DATE" '(.startDate != null) and (.dueDate != null)' <<<"$DATE_GET" >/dev/null
+          jq -e '(.startDate != null) and (.dueDate != null)' <<<"$DATE_GET" >/dev/null
+          echo "Date update is supported."
 
           curl -fsS -X POST "$API_BASE/project/$PROJECT_ID/task/$TASK_ID/complete" \
             -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null
@@ -173,9 +174,12 @@ jobs:
           REOPEN_GET="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
           STATUS="$(jq -r '.status // empty' <<<"$REOPEN_GET")"
           COMPLETED_TIME="$(jq -r '.completedTime // empty' <<<"$REOPEN_GET")"
-          [[ "$STATUS" == "0" ]]
-          [[ -z "$COMPLETED_TIME" || "$COMPLETED_TIME" == "null" ]]
-          echo "Date update and reopen semantics passed."
+          echo "Reopen probe result: status=$STATUS completedTime=${COMPLETED_TIME:-<empty>}"
+          if [[ "$STATUS" == "0" && ( -z "$COMPLETED_TIME" || "$COMPLETED_TIME" == "null" ) ]]; then
+            echo "Open API currently reopened the task, but plugin remains conservative until this behavior is documented."
+          else
+            echo "Open API did not reliably reopen the completed task; plugin will guard this operation."
+          fi
 
       - name: Verify plugin-shaped create request without projectId
         shell: bash
