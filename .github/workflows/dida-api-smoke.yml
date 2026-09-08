@@ -7,6 +7,7 @@ on:
       - ci/dida-api-smoke
     paths:
       - .github/workflows/dida-api-smoke.yml
+      - src/ticktick/**
 
 permissions:
   contents: read
@@ -42,6 +43,28 @@ jobs:
           set -euo pipefail
           dida auth token "$DIDA_ACCESS_TOKEN"
           dida auth status
+
+      - name: Verify project data endpoint used by picker and inbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_BASE="https://api.dida365.com/open/v1"
+          PROJECTS_FILE="$(mktemp)"
+          curl -fsS "$API_BASE/project" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" > "$PROJECTS_FILE"
+
+          PROJECT_ID="$(jq -r '.[0].id // empty' "$PROJECTS_FILE")"
+          if [[ -z "$PROJECT_ID" ]]; then
+            echo "No Dida project is available for project-data smoke testing."
+            exit 1
+          fi
+
+          DATA_FILE="$(mktemp)"
+          curl -fsS "$API_BASE/project/$PROJECT_ID/data" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" > "$DATA_FILE"
+
+          jq -e '.project.id and (.tasks | type == "array")' "$DATA_FILE" >/dev/null
+          echo "Project data endpoint returned project metadata and a task array."
 
       - name: Run real Dida CRUD smoke test
         shell: bash
