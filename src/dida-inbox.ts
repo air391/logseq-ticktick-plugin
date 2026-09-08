@@ -26,6 +26,29 @@ const findInboxProjection = async (taskId: string): Promise<BlockEntity | null> 
   }
 };
 
+const listInboxProjections = async (): Promise<BlockEntity[]> => {
+  const query = `
+    [:find (pull ?b [*])
+     :where
+     [?b :block/properties ?props]
+     [(get ?props :dida-inbox-task-id)]]
+  `;
+
+  try {
+    const result = await logseq.DB.datascriptQuery(query);
+    return (result || []).map((row: any[]) => row[0] as BlockEntity);
+  } catch (error) {
+    console.warn('Failed to list Dida Inbox projections', error);
+    return [];
+  }
+};
+
+const readInboxTaskId = async (block: BlockEntity): Promise<string> => {
+  const properties = await logseq.Editor.getBlockProperties(block.uuid);
+  const value = properties?.[INBOX_TASK_ID_PROPERTY];
+  return typeof value === 'string' ? value : '';
+};
+
 const getOrCreateInboxPage = async (): Promise<PageEntity> => {
   const existing = await logseq.Editor.getPage(INBOX_PAGE_NAME);
   if (existing) return existing;
@@ -62,21 +85,36 @@ export const removeInboxProjection = async (taskId: string): Promise<void> => {
   await logseq.Editor.removeBlock(block.uuid);
 };
 
+export interface InboxRefreshResult {
+  added: number;
+  removed: number;
+}
+
 export const refreshDidaInbox = async (
   tasks: Array<{ project: Project; task: Task }>,
   isFormallyLinked: (taskId: string) => Promise<boolean>,
-): Promise<number> => {
+): Promise<InboxRefreshResult> => {
+  const openTaskIds = new Set(tasks.map(({ task }) => task.id));
   let added = 0;
-  for (const entry of tasks) {
-    if (await isFormallyLinked(entry.task.id)) {
-      await removeInboxProjection(entry.task.id);
-      continue;
+  let removed = 0;
+
+  for (const projection of await listInboxProjections()) {
+    const taskId = await readInboxTaskId(projection);
+    if (!taskId) continue;
+    if (!openTaskIds.has(taskId) || await isFormallyLinked(taskId)) {
+      await logseq.Editor.removeBlock(projection.uuid);
+      removed += 1;
     }
+  }
+
+  for (const entry of tasks) {
+    if (await isFormallyLinked(entry.task.id)) continue;
 
     const existing = await findInboxProjection(entry.task.id);
     if (existing) continue;
     const created = await ensureInboxProjection(entry.project, entry.task);
     if (created) added += 1;
   }
-  return added;
+
+  return { added, removed };
 };
