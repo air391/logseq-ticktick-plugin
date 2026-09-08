@@ -27,3 +27,4 @@ jobs:
       - run: node scripts/test-sync-conflict.mjs
       - run: node scripts/test-inbox-content.mjs
       - run: node scripts/test-task-enumeration.mjs
+      - run: node scripts/test-task-state.mjs
