@@ -36,10 +36,9 @@ const priorityToTag = (priority: 0 | 1 | 3 | 5 | undefined): string => {
 };
 
 const parseTask = (text: string): NewTask => {
-  // parse priority and remove it from the title
   const priority = priorityToNum(text);
   let title = text.replace(/\[#([A-C])\]/, '');
-  title = title.replace(/TODO/, '');
+  title = title.replace(/TODO/, '').trim();
 
   return {
     title,
@@ -76,16 +75,26 @@ const createTask: (task: NewTask, block: BlockEntity) => Promise<void> = async (
 ) => {
   try {
     const newTask = await ticktick.createTask(task);
+    const taskUrl = newTask.taskUrl || '';
     await logseq.Editor.updateBlock(
       block.uuid,
-      `TODO ${priorityToTag(newTask.priority)}[${newTask.title}](${newTask.taskUrl
-      })`,
+      `TODO ${priorityToTag(newTask.priority)}[${newTask.title}](${taskUrl})`,
     );
   } catch (error) {
-    await logseq.UI.showMsg('TickTick access token is invalid.', 'error', {
-      timeout: 3000,
+    console.error(error);
+    const { service } = getTickTickSettings();
+    const serviceName = service === 'dida' ? 'Dida365' : 'TickTick';
+    await logseq.UI.showMsg(`${serviceName} request failed. Check the access token and network connection.`, 'error', {
+      timeout: 4000,
     });
   }
+};
+
+const applySettings = () => {
+  const settings = getTickTickSettings();
+  ticktick.setService(settings.service);
+  ticktick.setAccessToken(settings.accessToken);
+  return settings;
 };
 
 const main: () => Promise<void> = async () => {
@@ -93,19 +102,19 @@ const main: () => Promise<void> = async () => {
 
   logseq.useSettingsSchema(settingsSchema);
 
-  let settings = getTickTickSettings();
-  ticktick.setAccessToken(settings.accessToken);
+  let settings = applySettings();
 
   logseq.onSettingsChanged(() => {
-    const newSettings = getTickTickSettings();
-    ticktick.setAccessToken(newSettings.accessToken);
-    logseq.UI.showMsg('TickTick access token is updated.', 'success', {
+    settings = applySettings();
+    const serviceName = settings.service === 'dida' ? 'Dida365' : 'TickTick';
+    logseq.UI.showMsg(`${serviceName} settings updated.`, 'success', {
       timeout: 3000,
     });
   });
 
   if (settings.accessToken === '') {
-    await logseq.UI.showMsg('TickTick access token is not set.', 'warning', {
+    const serviceName = settings.service === 'dida' ? 'Dida365' : 'TickTick';
+    await logseq.UI.showMsg(`${serviceName} access token is not set.`, 'warning', {
       timeout: 3000,
     });
   }
@@ -117,7 +126,7 @@ const main: () => Promise<void> = async () => {
       return;
     }
 
-    let contentTree = await getTreeContent(blockEntity);
+    const contentTree = await getTreeContent(blockEntity);
     if (!contentTree) {
       console.error('Cannot get tree content from block entity');
       return;
@@ -125,24 +134,21 @@ const main: () => Promise<void> = async () => {
 
     const flatContentTree = flattenTree(contentTree);
 
-    const subtasks: Subtask[] = flatContentTree.slice(1).map((child) => {
-      const subtask: Subtask = {
-        title: child.content.replace(/TODO/, '').replace(/\[#([A-C])\]/, ''),
-      };
-      return subtask;
-    });
+    const subtasks: Subtask[] = flatContentTree.slice(1).map((child) => ({
+      title: child.content.replace(/TODO/, '').replace(/\[#([A-C])\]/, '').trim(),
+    }));
 
     const task = parseTask(flatContentTree[0]?.content || '');
     task.items = subtasks;
 
-    if (task.title.length == 0) {
+    if (task.title.length === 0) {
       await logseq.UI.showMsg('Task title cannot be empty.', 'warning', {
         timeout: 3000,
       });
       return;
     }
 
-    createTask(task, flatContentTree[0]);
+    await createTask(task, flatContentTree[0]);
   });
 };
 
