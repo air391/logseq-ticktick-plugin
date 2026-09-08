@@ -1,10 +1,18 @@
 import '@logseq/libs';
+import './index.css';
 import TickTick from './ticktick/ticktick';
 import { NewTask, Subtask, Task } from './ticktick/task';
 import { logseq as PackageLogseq } from '../package.json';
 import { settingsSchema, getTickTickSettings } from './settings';
 import { BlockEntity } from '@logseq/libs/dist/LSPlugin';
-import { getRemoteTaskMapping, saveRemoteTaskMapping } from './sync-state';
+import {
+  findBlockBoundToRemoteTask,
+  getRemoteTaskMapping,
+  removeRemoteTaskMapping,
+  saveRemoteTaskMapping,
+} from './sync-state';
+import { openTaskPicker, TaskChoice } from './task-picker';
+import { refreshDidaInbox, removeInboxProjection } from './dida-inbox';
 
 const pluginId = PackageLogseq.id;
 const ticktick = new TickTick();
@@ -81,6 +89,7 @@ const syncTask = async (task: NewTask, block: BlockEntity): Promise<void> => {
     }
 
     await saveRemoteTaskMapping(block, service, remoteTask);
+    await removeInboxProjection(remoteTask.id);
 
     await logseq.UI.showMsg(`${serviceName} task ${action}.`, 'success', {
       timeout: 3000,
@@ -91,6 +100,104 @@ const syncTask = async (task: NewTask, block: BlockEntity): Promise<void> => {
       timeout: 4000,
     });
   }
+};
+
+const linkExistingTask = async (block: BlockEntity): Promise<void> => {
+  const { service } = getTickTickSettings();
+  const serviceName = service === 'dida' ? 'Dida365' : 'TickTick';
+
+  try {
+    const existingMapping = await getRemoteTaskMapping(block);
+    if (existingMapping) {
+      await logseq.UI.showMsg('Current block is already linked. Unlink it before choosing another task.', 'warning', {
+        timeout: 4000,
+      });
+      return;
+    }
+
+    const entries = await ticktick.getOpenTasks();
+    const choices: TaskChoice[] = await Promise.all(
+      entries.map(async (entry) => ({
+        ...entry,
+        linked: Boolean(await findBlockBoundToRemoteTask(entry.task.id)),
+      })),
+    );
+
+    openTaskPicker(choices, async (choice) => {
+      const alreadyLinked = await findBlockBoundToRemoteTask(choice.task.id);
+      if (alreadyLinked && alreadyLinked.uuid !== block.uuid) {
+        throw new Error(`Task is already linked to block ${alreadyLinked.uuid}`);
+      }
+
+      await saveRemoteTaskMapping(block, service, choice.task);
+      await removeInboxProjection(choice.task.id);
+
+      const normalized = block.content
+        .replace(/^(TODO|DONE|DOING|NOW|LATER|WAITING)\s+/, '')
+        .trim();
+      if (!normalized) {
+        await logseq.Editor.updateBlock(block.uuid, `TODO ${choice.task.title}`);
+      }
+
+      await logseq.UI.showMsg(`${serviceName} task linked.`, 'success', {
+        timeout: 3000,
+      });
+    });
+  } catch (error) {
+    console.error(error);
+    await logseq.UI.showMsg(`Failed to load ${serviceName} tasks.`, 'error', {
+      timeout: 4000,
+    });
+  }
+};
+
+const unlinkCurrentTask = async (block: BlockEntity): Promise<void> => {
+  const mapping = await getRemoteTaskMapping(block);
+  if (!mapping) {
+    await logseq.UI.showMsg('Current block is not linked to a remote task.', 'warning', {
+      timeout: 3000,
+    });
+    return;
+  }
+
+  await removeRemoteTaskMapping(block);
+  await logseq.UI.showMsg('Remote task link removed. The Dida task was not deleted.', 'success', {
+    timeout: 3000,
+  });
+};
+
+const refreshInbox = async (): Promise<void> => {
+  const { service } = getTickTickSettings();
+  if (service !== 'dida') {
+    await logseq.UI.showMsg('Dida Inbox is available when Task Service is set to Dida365.', 'warning', {
+      timeout: 3500,
+    });
+    return;
+  }
+
+  try {
+    const tasks = await ticktick.getOpenTasks();
+    const added = await refreshDidaInbox(tasks, async (taskId) =>
+      Boolean(await findBlockBoundToRemoteTask(taskId)),
+    );
+    await logseq.UI.showMsg(`Dida Inbox refreshed. ${added} new task${added === 1 ? '' : 's'} added.`, 'success', {
+      timeout: 3500,
+    });
+  } catch (error) {
+    console.error(error);
+    await logseq.UI.showMsg('Failed to refresh Dida Inbox.', 'error', {
+      timeout: 4000,
+    });
+  }
+};
+
+const getCurrentBlockOrWarn = async (): Promise<BlockEntity | null> => {
+  const block = await logseq.Editor.getCurrentBlock();
+  if (!block) {
+    await logseq.UI.showMsg('No block selected.', 'warning', { timeout: 2500 });
+    return null;
+  }
+  return block;
 };
 
 const applySettings = () => {
@@ -104,6 +211,7 @@ const main: () => Promise<void> = async () => {
   console.info(`#${pluginId}: MAIN`);
 
   logseq.useSettingsSchema(settingsSchema);
+  logseq.hideMainUI();
 
   let settings = applySettings();
 
@@ -122,12 +230,9 @@ const main: () => Promise<void> = async () => {
     });
   }
 
-  logseq.Editor.registerSlashCommand('TT', async () => {
-    const blockEntity = await logseq.Editor.getCurrentBlock();
-    if (!blockEntity) {
-      console.error('No block selected');
-      return;
-    }
+  logseq.Editor.registerSlashCommand('Dida Create / Sync', async () => {
+    const blockEntity = await getCurrentBlockOrWarn();
+    if (!blockEntity) return;
 
     const contentTree = await getTreeContent(blockEntity);
     if (!contentTree) {
@@ -136,7 +241,6 @@ const main: () => Promise<void> = async () => {
     }
 
     const flatContentTree = flattenTree(contentTree);
-
     const subtasks: Subtask[] = flatContentTree.slice(1).map((child) => ({
       title: child.content.replace(/TODO/, '').replace(/DONE/, '').replace(/\[#([A-C])\]/, '').trim(),
     }));
@@ -151,6 +255,35 @@ const main: () => Promise<void> = async () => {
       return;
     }
 
+    await syncTask(task, flatContentTree[0]);
+  });
+
+  logseq.Editor.registerSlashCommand('Dida Link Existing', async () => {
+    const block = await getCurrentBlockOrWarn();
+    if (block) await linkExistingTask(block);
+  });
+
+  logseq.Editor.registerSlashCommand('Dida Unlink', async () => {
+    const block = await getCurrentBlockOrWarn();
+    if (block) await unlinkCurrentTask(block);
+  });
+
+  logseq.Editor.registerSlashCommand('Dida Refresh Inbox', async () => {
+    await refreshInbox();
+  });
+
+  // Preserve the original short command for existing users.
+  logseq.Editor.registerSlashCommand('TT', async () => {
+    const block = await getCurrentBlockOrWarn();
+    if (!block) return;
+    const contentTree = await getTreeContent(block);
+    if (!contentTree) return;
+    const flatContentTree = flattenTree(contentTree);
+    const task = parseTask(flatContentTree[0]?.content || '');
+    task.items = flatContentTree.slice(1).map((child) => ({
+      title: child.content.replace(/TODO/, '').replace(/DONE/, '').replace(/\[#([A-C])\]/, '').trim(),
+    }));
+    if (task.title.length === 0) return;
     await syncTask(task, flatContentTree[0]);
   });
 };
