@@ -9,6 +9,21 @@ The plugin supports both Dida365 and TickTick through the same task client abstr
 
 The real Dida API smoke test validates project listing and task CRUD using the repository secret. It also validates the request shape currently emitted by the Logseq command when creating a task without an explicit project ID.
 
+## Dida system Inbox
+
+Dida's system Inbox is an OpenAPI special case. A task created without `projectId` is assigned a concrete project ID such as `inbox1028940311`, but that system project is **not returned by** `GET /project`.
+
+Real API probes confirm all of the following:
+
+- `GET /project/inbox/data` succeeds and lists system Inbox tasks.
+- `GET /project/<returned-inbox-id>/data` also succeeds and lists those tasks.
+- `GET /project/<returned-inbox-id>/task/<task-id>` can directly read a known Inbox task.
+- the system Inbox project itself is absent from the ordinary `/project` collection.
+
+For Dida365, open-task enumeration therefore combines ordinary project-data responses with one extra `GET /project/inbox/data` request and de-duplicates tasks by task ID. This is required for `Dida Link Existing` and the plugin's `[[Dida Inbox]]` projection to include tasks that live in Dida's own system Inbox.
+
+TickTick does not use this Dida-specific extra enumeration path.
+
 ## Logseq graph compatibility
 
 The current supported runtime target is a traditional **File Graph** (Markdown/Org graph).
