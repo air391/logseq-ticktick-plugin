@@ -16,6 +16,9 @@ import { refreshDidaInbox, removeInboxProjection } from './dida-inbox';
 
 const pluginId = PackageLogseq.id;
 const ticktick = new TickTick();
+const INBOX_REFRESH_INTERVAL_MS = 60_000;
+let inboxRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let inboxRefreshInFlight = false;
 
 const priorityToNum = (text: string): 0 | 1 | 3 | 5 => {
   const priority = text.match(/\[#([A-C])\]/);
@@ -166,29 +169,55 @@ const unlinkCurrentTask = async (block: BlockEntity): Promise<void> => {
   });
 };
 
-const refreshInbox = async (): Promise<void> => {
-  const { service } = getTickTickSettings();
-  if (service !== 'dida') {
-    await logseq.UI.showMsg('Dida Inbox is available when Task Service is set to Dida365.', 'warning', {
-      timeout: 3500,
-    });
+const refreshInbox = async (showMessage = true): Promise<void> => {
+  const { service, accessToken } = getTickTickSettings();
+  if (service !== 'dida' || !accessToken || inboxRefreshInFlight) {
+    if (showMessage && service !== 'dida') {
+      await logseq.UI.showMsg('Dida Inbox is available when Task Service is set to Dida365.', 'warning', {
+        timeout: 3500,
+      });
+    }
     return;
   }
 
+  inboxRefreshInFlight = true;
   try {
     const tasks = await ticktick.getOpenTasks();
-    const added = await refreshDidaInbox(tasks, async (taskId) =>
+    const result = await refreshDidaInbox(tasks, async (taskId) =>
       Boolean(await findBlockBoundToRemoteTask(taskId)),
     );
-    await logseq.UI.showMsg(`Dida Inbox refreshed. ${added} new task${added === 1 ? '' : 's'} added.`, 'success', {
-      timeout: 3500,
-    });
+    if (showMessage) {
+      await logseq.UI.showMsg(
+        `Dida Inbox refreshed. ${result.added} added, ${result.removed} removed.`,
+        'success',
+        { timeout: 3500 },
+      );
+    }
   } catch (error) {
     console.error(error);
-    await logseq.UI.showMsg('Failed to refresh Dida Inbox.', 'error', {
-      timeout: 4000,
-    });
+    if (showMessage) {
+      await logseq.UI.showMsg('Failed to refresh Dida Inbox.', 'error', {
+        timeout: 4000,
+      });
+    }
+  } finally {
+    inboxRefreshInFlight = false;
   }
+};
+
+const configureInboxAutoRefresh = (): void => {
+  if (inboxRefreshTimer) {
+    clearInterval(inboxRefreshTimer);
+    inboxRefreshTimer = null;
+  }
+
+  const settings = getTickTickSettings();
+  if (settings.service !== 'dida' || !settings.accessToken || !settings.autoRefreshDidaInbox) return;
+
+  void refreshInbox(false);
+  inboxRefreshTimer = setInterval(() => {
+    void refreshInbox(false);
+  }, INBOX_REFRESH_INTERVAL_MS);
 };
 
 const getCurrentBlockOrWarn = async (): Promise<BlockEntity | null> => {
@@ -217,6 +246,7 @@ const main: () => Promise<void> = async () => {
 
   logseq.onSettingsChanged(() => {
     settings = applySettings();
+    configureInboxAutoRefresh();
     const serviceName = settings.service === 'dida' ? 'Dida365' : 'TickTick';
     logseq.UI.showMsg(`${serviceName} settings updated.`, 'success', {
       timeout: 3000,
@@ -269,7 +299,7 @@ const main: () => Promise<void> = async () => {
   });
 
   logseq.Editor.registerSlashCommand('Dida Refresh Inbox', async () => {
-    await refreshInbox();
+    await refreshInbox(true);
   });
 
   // Preserve the original short command for existing users.
@@ -285,6 +315,11 @@ const main: () => Promise<void> = async () => {
     }));
     if (task.title.length === 0) return;
     await syncTask(task, flatContentTree[0]);
+  });
+
+  configureInboxAutoRefresh();
+  window.addEventListener('beforeunload', () => {
+    if (inboxRefreshTimer) clearInterval(inboxRefreshTimer);
   });
 };
 
