@@ -1,12 +1,18 @@
 import { Task } from './ticktick/task';
 import { localStateToRemoteTask, parseLocalTaskState } from './task-state';
 
+export interface ManagedChecklistItemSnapshot {
+  title: string;
+  completed: boolean;
+}
+
 export interface ManagedTaskSnapshot {
   title: string;
   completed: boolean;
   priority: 0 | 1 | 3 | 5;
   startDate: string | null;
   dueDate: string | null;
+  items: ManagedChecklistItemSnapshot[];
 }
 
 export type SyncDecision =
@@ -22,7 +28,10 @@ const normalizedDate = (value?: string): string | null => {
   return Number.isNaN(date.getTime()) ? value : date.toISOString();
 };
 
-export const snapshotFromLocalContent = (content: string): ManagedTaskSnapshot => {
+export const snapshotFromLocalContent = (
+  content: string,
+  items: ManagedChecklistItemSnapshot[] = [],
+): ManagedTaskSnapshot => {
   const local = parseLocalTaskState(content);
   const remoteShape = localStateToRemoteTask(local);
   return {
@@ -31,6 +40,7 @@ export const snapshotFromLocalContent = (content: string): ManagedTaskSnapshot =
     priority: local.priority,
     startDate: normalizedDate(remoteShape.startDate),
     dueDate: normalizedDate(remoteShape.dueDate),
+    items,
   };
 };
 
@@ -40,6 +50,10 @@ export const snapshotFromRemoteTask = (task: Task): ManagedTaskSnapshot => ({
   priority: task.priority || 0,
   startDate: normalizedDate(task.startDate),
   dueDate: normalizedDate(task.dueDate),
+  items: (task.items || []).map((item) => ({
+    title: item.title || '',
+    completed: item.status === 1 || Boolean(item.completedTime),
+  })),
 });
 
 export const serializeSnapshot = (snapshot: ManagedTaskSnapshot): string =>
@@ -48,9 +62,22 @@ export const serializeSnapshot = (snapshot: ManagedTaskSnapshot): string =>
 export const parseSnapshot = (value: string | undefined): ManagedTaskSnapshot | null => {
   if (!value) return null;
   try {
-    const parsed = JSON.parse(value) as ManagedTaskSnapshot;
+    const parsed = JSON.parse(value) as Partial<ManagedTaskSnapshot>;
     if (typeof parsed.title !== 'string' || typeof parsed.completed !== 'boolean') return null;
-    return parsed;
+    return {
+      title: parsed.title,
+      completed: parsed.completed,
+      priority: parsed.priority === 1 || parsed.priority === 3 || parsed.priority === 5 ? parsed.priority : 0,
+      startDate: typeof parsed.startDate === 'string' ? parsed.startDate : null,
+      dueDate: typeof parsed.dueDate === 'string' ? parsed.dueDate : null,
+      items: Array.isArray(parsed.items)
+        ? parsed.items
+            .filter((item): item is ManagedChecklistItemSnapshot =>
+              Boolean(item) && typeof item.title === 'string' && typeof item.completed === 'boolean',
+            )
+            .map((item) => ({ title: item.title, completed: item.completed }))
+        : [],
+    };
   } catch {
     return null;
   }
