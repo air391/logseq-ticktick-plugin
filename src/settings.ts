@@ -19,10 +19,10 @@ export const settingsSchema: SettingSchemaDesc[] = [
     default: '',
   },
   {
-    key: 'auto_refresh_dida_inbox',
+    key: 'auto_sync_dida',
     type: 'boolean',
-    title: 'Auto Refresh Dida Inbox',
-    description: 'Automatically import unlinked open Dida tasks into [[Dida Inbox]] while Logseq is running.',
+    title: 'Auto Sync Dida',
+    description: 'Automatically reconcile linked tasks and import unlinked open tasks into [[Dida Inbox]] while Logseq is running.',
     default: true,
   },
 ];
@@ -30,11 +30,12 @@ export const settingsSchema: SettingSchemaDesc[] = [
 export const getTickTickSettings = () => {
   const accessToken = logseq.settings!['access_token'];
   const service = logseq.settings!['service'] as TaskService | undefined;
-  const autoRefreshDidaInbox = logseq.settings!['auto_refresh_dida_inbox'];
+  const autoSyncDida = logseq.settings!['auto_sync_dida'];
+  const legacyAutoRefresh = logseq.settings!['auto_refresh_dida_inbox'];
 
   return {
     accessToken: accessToken || '',
     service: service || 'dida',
-    autoRefreshDidaInbox: autoRefreshDidaInbox !== false,
+    autoSyncDida: autoSyncDida !== undefined ? autoSyncDida !== false : legacyAutoRefresh !== false,
   };
 };
