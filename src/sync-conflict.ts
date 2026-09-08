@@ -86,6 +86,38 @@ export const parseSnapshot = (value: string | undefined): ManagedTaskSnapshot | 
 const equal = (a: ManagedTaskSnapshot, b: ManagedTaskSnapshot): boolean =>
   serializeSnapshot(a) === serializeSnapshot(b);
 
+const itemTitles = (snapshot: ManagedTaskSnapshot): string[] =>
+  snapshot.items.map((item) => item.title);
+
+const sameTitleMultiset = (a: string[], b: string[]): boolean => {
+  if (a.length !== b.length) return false;
+  return [...a].sort().every((value, index) => value === [...b].sort()[index]);
+};
+
+const isPrefix = (prefix: string[], full: string[]): boolean =>
+  prefix.length <= full.length && prefix.every((value, index) => value === full[index]);
+
+const remoteChecklistChangeIsUnsafe = (
+  baseline: ManagedTaskSnapshot,
+  remote: ManagedTaskSnapshot,
+): boolean => {
+  const baselineTitles = itemTitles(baseline);
+  const remoteTitles = itemTitles(remote);
+
+  if (remoteTitles.length < baselineTitles.length) return true;
+  if (remoteTitles.length > baselineTitles.length) {
+    // Appending is deterministic with the current Logseq SDK. Inserting items in
+    // the middle would shift positional identity and could attach local notes to
+    // the wrong checklist item.
+    return !isPrefix(baselineTitles, remoteTitles);
+  }
+
+  // A pure reorder cannot be distinguished safely from item identity because
+  // Dida regenerates checklist item ids on every task update.
+  const orderChanged = baselineTitles.some((value, index) => value !== remoteTitles[index]);
+  return orderChanged && sameTitleMultiset(baselineTitles, remoteTitles);
+};
+
 export const classifySyncState = (
   baseline: ManagedTaskSnapshot | null,
   local: ManagedTaskSnapshot,
@@ -97,8 +129,16 @@ export const classifySyncState = (
   const localChanged = !equal(local, baseline);
   const remoteChanged = !equal(remote, baseline);
 
-  if (!localChanged && remoteChanged) return 'pull-remote';
-  if (localChanged && !remoteChanged) return 'keep-local';
+  if (!localChanged && remoteChanged) {
+    return remoteChecklistChangeIsUnsafe(baseline, remote) ? 'conflict' : 'pull-remote';
+  }
+  if (localChanged && !remoteChanged) {
+    // Local checklist deletion is allowed only through an explicit manual push.
+    // Automatic synchronization turns it into a conflict instead of deleting
+    // remote checklist data silently.
+    if (local.items.length < baseline.items.length) return 'conflict';
+    return 'keep-local';
+  }
   if (!localChanged && !remoteChanged) return 'unchanged';
   return 'conflict';
 };
