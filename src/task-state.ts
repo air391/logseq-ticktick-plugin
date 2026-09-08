@@ -118,3 +118,54 @@ export const remoteTaskToBlockContent = (remote: Task, currentContent: string): 
 
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 };
+
+const stableHash = (value: unknown): string => {
+  const text = JSON.stringify(value);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
+
+export const localTaskFingerprint = (
+  content: string,
+  children: string[] = [],
+): string => {
+  const state = parseLocalTaskState(content);
+  return stableHash({
+    marker: state.marker === 'DONE' ? 'DONE' : 'OPEN',
+    title: state.title,
+    priority: state.priority,
+    scheduled: state.scheduled || null,
+    deadline: state.deadline || null,
+    children: children.map((child) => {
+      const childState = parseLocalTaskState(child);
+      return {
+        status: childState.marker === 'DONE' ? 1 : 0,
+        title: childState.title,
+      };
+    }),
+  });
+};
+
+export const remoteTaskFingerprint = (task: Task): string => stableHash({
+  status: task.status === 1 || task.completedTime ? 1 : 0,
+  title: task.title,
+  priority: task.priority || 0,
+  startDate: task.startDate || null,
+  dueDate: task.dueDate || null,
+  isAllDay: Boolean(task.isAllDay ?? task.allDay),
+  items: (task.items || []).map((item) => ({
+    status: item.status || 0,
+    title: item.title,
+  })),
+});
+
+export const remoteModifiedAt = (task: Task): number | null => {
+  const raw = task.modifiedTime || task.updatedTime || task.updateTime;
+  if (!raw) return null;
+  const value = Date.parse(raw);
+  return Number.isFinite(value) ? value : null;
+};
