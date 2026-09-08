@@ -16,9 +16,7 @@ export interface RemoteTaskMapping {
 
 const readProperty = (properties: Record<string, any>, key: string): string => {
   const exact = properties[key];
-  if (typeof exact === 'string') {
-    return exact;
-  }
+  if (typeof exact === 'string') return exact;
 
   const namespacedKey = Object.keys(properties).find((candidate) =>
     candidate === key || candidate.endsWith(`.${key}`),
@@ -31,18 +29,14 @@ export const getRemoteTaskMapping = async (
   block: BlockEntity,
 ): Promise<RemoteTaskMapping | null> => {
   const properties = await logseq.Editor.getBlockProperties(block.uuid);
-  if (!properties) {
-    return null;
-  }
+  if (!properties) return null;
 
   const taskId = readProperty(properties, TASK_ID_PROPERTY);
   const projectId = readProperty(properties, PROJECT_ID_PROPERTY);
   const service = readProperty(properties, SERVICE_PROPERTY) as TaskService;
   const taskUrl = readProperty(properties, TASK_URL_PROPERTY);
 
-  if (!taskId || !projectId || (service !== 'dida' && service !== 'ticktick')) {
-    return null;
-  }
+  if (!taskId || !projectId || (service !== 'dida' && service !== 'ticktick')) return null;
 
   return {
     taskId,
@@ -66,11 +60,36 @@ export const findBlockBoundToRemoteTask = async (
 
   try {
     const result = await logseq.DB.datascriptQuery(query, taskId);
-    const block = result?.[0]?.[0] as BlockEntity | undefined;
-    return block || null;
+    return (result?.[0]?.[0] as BlockEntity | undefined) || null;
   } catch (error) {
     console.warn('Failed to query remote task binding', error);
     return null;
+  }
+};
+
+export const listRemoteTaskBindings = async (): Promise<
+  Array<{ block: BlockEntity; mapping: RemoteTaskMapping }>
+> => {
+  const query = `
+    [:find (pull ?b [*])
+     :where
+     [?b :block/properties ?props]
+     [(get ?props :remote-task-id) ?remote-id]]
+  `;
+
+  try {
+    const rows = await logseq.DB.datascriptQuery(query);
+    const bindings: Array<{ block: BlockEntity; mapping: RemoteTaskMapping }> = [];
+    for (const row of rows || []) {
+      const block = row?.[0] as BlockEntity | undefined;
+      if (!block) continue;
+      const mapping = await getRemoteTaskMapping(block);
+      if (mapping) bindings.push({ block, mapping });
+    }
+    return bindings;
+  } catch (error) {
+    console.warn('Failed to list remote task bindings', error);
+    return [];
   }
 };
 
