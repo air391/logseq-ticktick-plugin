@@ -1,0 +1,105 @@
+name: Dida API Smoke Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/dida-api-smoke
+    paths:
+      - .github/workflows/dida-api-smoke.yml
+
+permissions:
+  contents: read
+
+jobs:
+  dida-api-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DIDA_ACCESS_TOKEN: ${{ secrets.DIDA_ACCESS_TOKEN }}
+
+    steps:
+      - name: Verify secret is configured
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${DIDA_ACCESS_TOKEN:-}" ]]; then
+            echo "DIDA_ACCESS_TOKEN is not configured."
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install official Dida CLI
+        run: npm install --global @suibiji/dida-cli
+
+      - name: Authenticate with Dida
+        shell: bash
+        run: |
+          set -euo pipefail
+          dida auth token "$DIDA_ACCESS_TOKEN"
+          dida auth status
+
+      - name: Run real Dida CRUD smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_ID=""
+          TASK_ID=""
+
+          cleanup() {
+            if [[ -n "$PROJECT_ID" && -n "$TASK_ID" ]]; then
+              echo "Cleaning up CI task..."
+              dida task delete "$PROJECT_ID" "$TASK_ID" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          echo "Listing projects..."
+          PROJECTS_JSON="$(dida project list --json)"
+          PROJECT_ID="$(printf '%s' "$PROJECTS_JSON" | jq -r 'if type == "array" then .[0].id else (.projects // .data // [])[0].id end // empty')"
+
+          if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "null" ]]; then
+            echo "Could not find a project in Dida."
+            printf '%s\n' "$PROJECTS_JSON" | jq . || true
+            exit 1
+          fi
+
+          TITLE="[logseq-dida-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          UPDATED_TITLE="${TITLE} updated"
+
+          echo "Creating task in project ${PROJECT_ID}..."
+          CREATED_JSON="$(dida task create --title "$TITLE" --project "$PROJECT_ID" --json)"
+          TASK_ID="$(printf '%s' "$CREATED_JSON" | jq -r '.id // .task.id // .data.id // empty')"
+
+          if [[ -z "$TASK_ID" || "$TASK_ID" == "null" ]]; then
+            echo "Task creation returned no task id."
+            printf '%s\n' "$CREATED_JSON" | jq . || true
+            exit 1
+          fi
+
+          echo "Reading created task..."
+          GET_JSON="$(dida task get "$PROJECT_ID" "$TASK_ID" --json)"
+          ACTUAL_TITLE="$(printf '%s' "$GET_JSON" | jq -r '.title // .task.title // .data.title // empty')"
+          [[ "$ACTUAL_TITLE" == "$TITLE" ]]
+
+          echo "Updating task..."
+          dida task update "$TASK_ID" --id "$TASK_ID" --project "$PROJECT_ID" --title "$UPDATED_TITLE" --json >/tmp/dida-update.json
+
+          echo "Verifying update..."
+          GET_UPDATED_JSON="$(dida task get "$PROJECT_ID" "$TASK_ID" --json)"
+          ACTUAL_UPDATED_TITLE="$(printf '%s' "$GET_UPDATED_JSON" | jq -r '.title // .task.title // .data.title // empty')"
+          [[ "$ACTUAL_UPDATED_TITLE" == "$UPDATED_TITLE" ]]
+
+          echo "Completing task..."
+          dida task complete "$PROJECT_ID" "$TASK_ID"
+
+          echo "Deleting test task..."
+          dida task delete "$PROJECT_ID" "$TASK_ID"
+          TASK_ID=""
+
+          echo "Dida real API CRUD smoke test passed."
