@@ -14,10 +14,10 @@ export interface Task {
     title: string;
     allDay?: boolean;
     isAllDay?: boolean;
-    completedTime?: string; // Format: "yyyy-MM-dd'T'HH:mm:ssZ", Example: "2019-11-13T03:00:00+0000"
+    completedTime?: string;
     content?: string;
     desc?: string;
-    dueDate?: string; // Format: "yyyy-MM-dd'T'HH:mm:ssZ", Example: "2019-11-13T03:00:00+0000"
+    dueDate?: string;
     items?: Subtask[];
     priority?: TaskPriority;
     reminders?: string[];
@@ -27,6 +27,12 @@ export interface Task {
     status?: 0 | 1;
     timeZone?: string;
     taskUrl?: string;
+}
+
+export interface ProjectData {
+    project: Project;
+    tasks: Task[];
+    columns?: unknown[];
 }
 
 export interface Subtask {
