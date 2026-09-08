@@ -1,4 +1,4 @@
-import { NewTask, Project, Task, TaskUpdate } from './task';
+import { NewTask, Project, ProjectData, Task, TaskUpdate } from './task';
 
 export type TaskService = 'dida' | 'ticktick';
 
@@ -112,6 +112,38 @@ class TickTick {
 
     public async getProjects(): Promise<Project[]> {
         return this.request<Project[]>('/project');
+    }
+
+    public async getProjectData(projectId: string): Promise<ProjectData> {
+        return this.request<ProjectData>(`/project/${encodeURIComponent(projectId)}/data`);
+    }
+
+    public async getOpenTasks(): Promise<Array<{ project: Project; task: Task }>> {
+        const projects = await this.getProjects();
+        const projectData = await Promise.all(
+            projects.map(async (project) => {
+                try {
+                    return await this.getProjectData(project.id);
+                } catch (error) {
+                    console.warn(`Failed to load project ${project.id}`, error);
+                    return null;
+                }
+            }),
+        );
+
+        const tasks: Array<{ project: Project; task: Task }> = [];
+        for (let i = 0; i < projects.length; i += 1) {
+            const data = projectData[i];
+            if (!data) continue;
+            for (const task of data.tasks || []) {
+                if (task.status === 1 || task.completedTime) continue;
+                tasks.push({
+                    project: projects[i],
+                    task: this.withTaskUrl(task),
+                });
+            }
+        }
+        return tasks;
     }
 
     public async getTask(projectId: string, taskId: string): Promise<Task> {
