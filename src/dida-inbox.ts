@@ -1,5 +1,6 @@
 import { BlockEntity, PageEntity } from '@logseq/libs/dist/LSPlugin';
 import { Project, Task } from './ticktick/task';
+import { queryBlocksByPluginProperty, readPluginProperty } from './property-query';
 
 const INBOX_PAGE_NAME = 'Dida Inbox';
 const INBOX_TASK_ID_PROPERTY = 'dida-inbox-task-id';
@@ -16,18 +17,9 @@ const INBOX_PROPERTIES = [
 ];
 
 const findInboxProjection = async (taskId: string): Promise<BlockEntity | null> => {
-  const query = `
-    [:find (pull ?b [*])
-     :in $ ?task-id
-     :where
-     [?b :block/properties ?props]
-     [(get ?props :dida-inbox-task-id) ?remote-id]
-     [(= ?remote-id ?task-id)]]
-  `;
-
   try {
-    const result = await logseq.DB.datascriptQuery(query, taskId);
-    return (result?.[0]?.[0] as BlockEntity | undefined) || null;
+    const blocks = await queryBlocksByPluginProperty(INBOX_TASK_ID_PROPERTY, taskId);
+    return blocks[0] || null;
   } catch (error) {
     console.warn('Failed to query Dida Inbox projection', error);
     return null;
@@ -35,16 +27,8 @@ const findInboxProjection = async (taskId: string): Promise<BlockEntity | null> 
 };
 
 const listInboxProjections = async (): Promise<BlockEntity[]> => {
-  const query = `
-    [:find (pull ?b [*])
-     :where
-     [?b :block/properties ?props]
-     [(get ?props :dida-inbox-task-id)]]
-  `;
-
   try {
-    const result = await logseq.DB.datascriptQuery(query);
-    return (result || []).map((row: any[]) => row[0] as BlockEntity);
+    return await queryBlocksByPluginProperty(INBOX_TASK_ID_PROPERTY);
   } catch (error) {
     console.warn('Failed to list Dida Inbox projections', error);
     return [];
@@ -53,8 +37,7 @@ const listInboxProjections = async (): Promise<BlockEntity[]> => {
 
 const readInboxTaskId = async (block: BlockEntity): Promise<string> => {
   const properties = await logseq.Editor.getBlockProperties(block.uuid);
-  const value = properties?.[INBOX_TASK_ID_PROPERTY];
-  return typeof value === 'string' ? value : '';
+  return properties ? readPluginProperty(properties, INBOX_TASK_ID_PROPERTY) : '';
 };
 
 const clearInboxProjectionProperties = async (block: BlockEntity): Promise<void> => {
@@ -68,9 +51,11 @@ const retireInboxProjection = async (block: BlockEntity): Promise<void> => {
   if (!fresh) return;
 
   const properties = await logseq.Editor.getBlockProperties(fresh.uuid);
-  const managedContent = properties?.[INBOX_MANAGED_CONTENT_PROPERTY];
+  const managedContent = properties
+    ? readPluginProperty(properties, INBOX_MANAGED_CONTENT_PROPERTY)
+    : '';
   const isKnownUntouched =
-    typeof managedContent === 'string' && fresh.content.trim() === managedContent.trim();
+    Boolean(managedContent) && fresh.content.trim() === managedContent.trim();
   const hasChildren = (fresh.children || []).length > 0;
 
   // Only delete a projection when we can prove it is still exactly the disposable
