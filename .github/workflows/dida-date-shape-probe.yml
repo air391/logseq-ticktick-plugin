@@ -1,0 +1,95 @@
+name: Dida Date Shape Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/dida-api-smoke
+    paths:
+      - .github/workflows/dida-date-shape-probe.yml
+      - src/task-state.ts
+
+permissions:
+  contents: read
+
+jobs:
+  dida-date-shape-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DIDA_ACCESS_TOKEN: ${{ secrets.DIDA_ACCESS_TOKEN }}
+
+    steps:
+      - name: Verify timed and all-day task semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_BASE="https://api.dida365.com/open/v1"
+          PROJECT_ID="$(curl -fsS "$API_BASE/project" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" | jq -r '.[0].id // empty')"
+          [[ -n "$PROJECT_ID" ]]
+
+          TIMED_TASK_ID=""
+          ALLDAY_TASK_ID=""
+          cleanup() {
+            for task_id in "$TIMED_TASK_ID" "$ALLDAY_TASK_ID"; do
+              if [[ -n "$task_id" ]]; then
+                curl -fsS -X DELETE "$API_BASE/project/$PROJECT_ID/task/$task_id" \
+                  -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null 2>&1 || true
+              fi
+            done
+          }
+          trap cleanup EXIT
+
+          TIMED_TITLE="[logseq-timed-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          TIMED_START="2026-09-10T00:00:00.000Z"
+          TIMED_DUE="2026-09-10T09:30:00.000Z"
+          TIMED_CREATE="$(curl -fsS -X POST "$API_BASE/task" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc \
+              --arg title "$TIMED_TITLE" \
+              --arg projectId "$PROJECT_ID" \
+              --arg startDate "$TIMED_START" \
+              --arg dueDate "$TIMED_DUE" \
+              '{title:$title,projectId:$projectId,startDate:$startDate,dueDate:$dueDate,isAllDay:false}')")"
+          TIMED_TASK_ID="$(jq -r '.id // empty' <<<"$TIMED_CREATE")"
+          [[ -n "$TIMED_TASK_ID" ]]
+
+          TIMED_GET="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$TIMED_TASK_ID" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          echo "Timed task response:"
+          jq '{id,startDate,dueDate,isAllDay,allDay,timeZone}' <<<"$TIMED_GET"
+
+          jq -e --arg dueDate "$TIMED_DUE" '
+            .dueDate == $dueDate
+            and ((.isAllDay // .allDay // false) == false)
+          ' <<<"$TIMED_GET" >/dev/null
+
+          ALLDAY_TITLE="[logseq-allday-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          ALLDAY_START="2026-09-11T00:00:00.000Z"
+          ALLDAY_DUE="2026-09-12T00:00:00.000Z"
+          ALLDAY_CREATE="$(curl -fsS -X POST "$API_BASE/task" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc \
+              --arg title "$ALLDAY_TITLE" \
+              --arg projectId "$PROJECT_ID" \
+              --arg startDate "$ALLDAY_START" \
+              --arg dueDate "$ALLDAY_DUE" \
+              '{title:$title,projectId:$projectId,startDate:$startDate,dueDate:$dueDate,isAllDay:true}')")"
+          ALLDAY_TASK_ID="$(jq -r '.id // empty' <<<"$ALLDAY_CREATE")"
+          [[ -n "$ALLDAY_TASK_ID" ]]
+
+          ALLDAY_GET="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$ALLDAY_TASK_ID" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          echo "All-day task response:"
+          jq '{id,startDate,dueDate,isAllDay,allDay,timeZone}' <<<"$ALLDAY_GET"
+
+          jq -e '
+            ((.isAllDay // .allDay // false) == true)
+            and (.startDate != null)
+            and (.dueDate != null)
+          ' <<<"$ALLDAY_GET" >/dev/null
+
+          echo "Dida timed/all-day semantics match the plugin request model."
