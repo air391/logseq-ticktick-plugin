@@ -14,6 +14,8 @@ const MARKER_RE = /^(TODO|DONE|DOING|NOW|LATER|WAITING)\s+/i;
 const PRIORITY_RE = /\[#([A-C])\]\s*/i;
 const SCHEDULED_RE = /^SCHEDULED:\s*<([^>]+)>\s*$/im;
 const DEADLINE_RE = /^DEADLINE:\s*<([^>]+)>\s*$/im;
+const DATE_RE = /(\d{4})-(\d{2})-(\d{2})/;
+const TIME_RE = /(?:^|\s)(\d{2}):(\d{2})(?:\s|$)/;
 
 const priorityFromContent = (content: string): 0 | 1 | 3 | 5 => {
   const match = content.match(PRIORITY_RE);
@@ -52,9 +54,12 @@ export const parseLocalTaskState = (content: string): LocalTaskState => {
 
 const parseLogseqTimestamp = (value?: string): Date | undefined => {
   if (!value) return undefined;
-  const match = value.match(/(\d{4})-(\d{2})-(\d{2})(?:\s+[^\s]+)?(?:\s+(\d{2}):(\d{2}))?/);
-  if (!match) return undefined;
-  const [, year, month, day, hour = '00', minute = '00'] = match;
+  const dateMatch = value.match(DATE_RE);
+  if (!dateMatch) return undefined;
+  const timeMatch = value.match(TIME_RE);
+  const [, year, month, day] = dateMatch;
+  const hour = timeMatch?.[1] || '00';
+  const minute = timeMatch?.[2] || '00';
   return new Date(
     Number(year),
     Number(month) - 1,
@@ -71,12 +76,17 @@ const toRemoteDate = (value?: string): string | undefined => {
   return date?.toISOString();
 };
 
+const hasExplicitTime = (value?: string): boolean => Boolean(value && TIME_RE.test(value));
+
 export const localStateToRemoteTask = (state: LocalTaskState): NewTask => ({
   title: state.title,
   priority: state.priority,
   startDate: toRemoteDate(state.scheduled),
   dueDate: toRemoteDate(state.deadline),
-  isAllDay: !/\d{2}:\d{2}/.test(state.scheduled || state.deadline || ''),
+  // Dida exposes one all-day flag for the task. If either Logseq timestamp has an
+  // explicit clock time, preserve the task as timed rather than silently dropping
+  // the more specific timestamp.
+  isAllDay: !hasExplicitTime(state.scheduled) && !hasExplicitTime(state.deadline),
 });
 
 const remoteDateToLogseqTimestamp = (value?: string, allDay = false): string | undefined => {
