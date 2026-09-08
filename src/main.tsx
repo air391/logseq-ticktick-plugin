@@ -55,14 +55,6 @@ const getTreeContent = async (block: BlockEntity): Promise<BlockEntity | null> =
   return logseq.Editor.getBlock(block.uuid, { includeChildren: true });
 };
 
-const flattenTree = (node: BlockEntity): BlockEntity[] => {
-  const result: BlockEntity[] = [node];
-  if (node.children) {
-    for (const child of node.children) result.push(...flattenTree(child as BlockEntity));
-  }
-  return result;
-};
-
 const subtaskTitle = (content: string): string =>
   content
     .replace(/^(TODO|DONE|DOING|NOW|LATER|WAITING)\s+/i, '')
@@ -84,13 +76,14 @@ const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<bo
       return false;
     }
 
-    const flatTree = flattenTree(contentTree);
-    const subtasks: Subtask[] = flatTree
-      .slice(1)
-      .map((child): Subtask => ({
-        title: subtaskTitle(child.content || ''),
-        status: parseLocalTaskState(child.content || '').marker === 'DONE' ? 1 : 0,
-      }))
+    const subtasks: Subtask[] = (contentTree.children || [])
+      .map((child): Subtask => {
+        const blockChild = child as BlockEntity;
+        return {
+          title: subtaskTitle(blockChild.content || ''),
+          status: parseLocalTaskState(blockChild.content || '').marker === 'DONE' ? 1 : 0,
+        };
+      })
       .filter((item) => item.title.length > 0);
 
     const payload = {
@@ -539,6 +532,16 @@ const main = async (): Promise<void> => {
 
   logseq.Editor.registerSlashCommand('Dida Refresh Inbox', async () => {
     await refreshInbox(true);
+  });
+
+  logseq.Editor.registerSlashCommand('Dida Resolve Conflict - Keep Logseq', async () => {
+    const block = await getCurrentBlockOrWarn();
+    if (block) await pushLocalTask(block, true);
+  });
+
+  logseq.Editor.registerSlashCommand('Dida Resolve Conflict - Use Dida', async () => {
+    const block = await getCurrentBlockOrWarn();
+    if (block) await pullRemoteTask(block);
   });
 
   // Preserve the original short command for existing users.
