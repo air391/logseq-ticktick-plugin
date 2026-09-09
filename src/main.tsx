@@ -39,8 +39,25 @@ const REMOTE_WRITE_SUPPRESSION_MS = 5_000;
 const TASK_MARKER_RE = /^(TODO|DONE|DOING|NOW|LATER|WAITING)\s+/i;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let refreshInFlight = false;
+let settingsOffHook: (() => void) | null = null;
+let dbOffHook: (() => void) | null = null;
 const localPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const remoteWriteUntil = new Map<string, number>();
+
+const cleanupRuntime = (): void => {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+  for (const timer of localPushTimers.values()) clearTimeout(timer);
+  localPushTimers.clear();
+  remoteWriteUntil.clear();
+  refreshInFlight = false;
+  settingsOffHook?.();
+  settingsOffHook = null;
+  dbOffHook?.();
+  dbOffHook = null;
+};
 
 const suppressLocalPush = (uuid: string): void => {
   remoteWriteUntil.set(uuid, Date.now() + REMOTE_WRITE_SUPPRESSION_MS);
@@ -260,10 +277,26 @@ const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<bo
       items: subtasksFromLocalTree(contentTree),
     };
     const mapping = await getRemoteTaskMapping(block);
+    if (mapping && mapping.service !== service) {
+      const linkedServiceName = mapping.service === 'dida' ? 'Dida365' : 'TickTick';
+      if (showMessage) {
+        await logseq.UI.showMsg(
+          `Current block is already linked to ${linkedServiceName}. Unlink it before switching task services.`,
+          'warning',
+          { timeout: 5000 },
+        );
+      } else {
+        console.warn(
+          `Skipped automatic push because block ${block.uuid} is linked to ${mapping.service}, not ${service}.`,
+        );
+      }
+      return false;
+    }
+
     let remoteTask: Task;
     let action: 'created' | 'updated';
 
-    if (mapping && mapping.service === service) {
+    if (mapping) {
       const currentRemote = await ticktick.getTask(mapping.projectId, mapping.taskId);
 
       if (!showMessage) {
@@ -740,9 +773,19 @@ const main = async (): Promise<void> => {
   logseq.useSettingsSchema(settingsSchema);
   logseq.hideMainUI();
 
+  if (await logseq.App.checkCurrentIsDbGraph()) {
+    await logseq.UI.showMsg(
+      'Dida365/TickTick Sync currently supports Logseq File Graphs only. Sync is disabled for this DB Graph.',
+      'warning',
+      { timeout: 7000 },
+    );
+    console.warn(`#${pluginId}: DB Graph detected; synchronization runtime was not started.`);
+    return;
+  }
+
   let settings = applySettings();
 
-  logseq.onSettingsChanged(() => {
+  settingsOffHook = logseq.onSettingsChanged(() => {
     settings = applySettings();
     configureAutoRefresh();
     const serviceName = settings.service === 'dida' ? 'Dida365' : 'TickTick';
@@ -758,7 +801,7 @@ const main = async (): Promise<void> => {
     );
   }
 
-  logseq.DB.onChanged(({ blocks }) => {
+  dbOffHook = logseq.DB.onChanged(({ blocks }) => {
     for (const block of blocks || []) void scheduleAutomaticPush(block);
   });
 
@@ -807,11 +850,7 @@ const main = async (): Promise<void> => {
   });
 
   configureAutoRefresh();
-  window.addEventListener('beforeunload', () => {
-    if (refreshTimer) clearInterval(refreshTimer);
-    for (const timer of localPushTimers.values()) clearTimeout(timer);
-    localPushTimers.clear();
-  });
+  logseq.beforeunload(cleanupRuntime);
 };
 
 logseq.ready(main).catch(console.error);
