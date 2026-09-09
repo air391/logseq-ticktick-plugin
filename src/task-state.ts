@@ -78,18 +78,20 @@ const toRemoteDate = (value?: string): string | undefined => {
 
 const hasExplicitTime = (value?: string): boolean => Boolean(value && TIME_RE.test(value));
 
+export const canonicalRemoteDate = (task: Pick<Task, 'dueDate' | 'startDate'>): string | null =>
+  task.dueDate || task.startDate || null;
+
 export const localStateToRemoteTask = (state: LocalTaskState): NewTask => ({
   title: state.title,
   priority: state.priority,
-  startDate: toRemoteDate(state.scheduled),
+  // Dida OpenAPI normalizes startDate and dueDate to one canonical task date.
+  // DEADLINE is therefore the only remote-managed Logseq date. SCHEDULED remains
+  // local planning metadata and must not be silently collapsed into the Dida date.
   dueDate: toRemoteDate(state.deadline),
-  // Dida exposes one all-day flag for the task. If either Logseq timestamp has an
-  // explicit clock time, preserve the task as timed rather than silently dropping
-  // the more specific timestamp.
-  isAllDay: !hasExplicitTime(state.scheduled) && !hasExplicitTime(state.deadline),
+  isAllDay: !hasExplicitTime(state.deadline),
 });
 
-const remoteDateToLogseqTimestamp = (value?: string, allDay = false): string | undefined => {
+const remoteDateToLogseqTimestamp = (value?: string | null, allDay = false): string | undefined => {
   if (!value) return undefined;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return undefined;
@@ -104,7 +106,8 @@ const preservedBodyLines = (content: string): string[] => {
   return content
     .split(/\r?\n/)
     .slice(1)
-    .filter((line) => !/^\s*(SCHEDULED|DEADLINE):\s*</i.test(line));
+    // SCHEDULED is intentionally local-only. Remote pulls replace DEADLINE only.
+    .filter((line) => !/^\s*DEADLINE:\s*</i.test(line));
 };
 
 export const remoteTaskToBlockContent = (remote: Task, currentContent: string): string => {
@@ -121,9 +124,7 @@ export const remoteTaskToBlockContent = (remote: Task, currentContent: string): 
   ];
 
   const allDay = Boolean(remote.isAllDay ?? remote.allDay);
-  const scheduled = remoteDateToLogseqTimestamp(remote.startDate, allDay);
-  const deadline = remoteDateToLogseqTimestamp(remote.dueDate, allDay);
-  if (scheduled) lines.push(`SCHEDULED: <${scheduled}>`);
+  const deadline = remoteDateToLogseqTimestamp(canonicalRemoteDate(remote), allDay);
   if (deadline) lines.push(`DEADLINE: <${deadline}>`);
 
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -148,7 +149,6 @@ export const localTaskFingerprint = (
     marker: state.marker === 'DONE' ? 'DONE' : 'OPEN',
     title: state.title,
     priority: state.priority,
-    scheduled: state.scheduled || null,
     deadline: state.deadline || null,
     children: children.map((child) => {
       const childState = parseLocalTaskState(child);
@@ -164,8 +164,7 @@ export const remoteTaskFingerprint = (task: Task): string => stableHash({
   status: task.status === 1 || task.completedTime ? 1 : 0,
   title: task.title,
   priority: task.priority || 0,
-  startDate: task.startDate || null,
-  dueDate: task.dueDate || null,
+  dueDate: canonicalRemoteDate(task),
   isAllDay: Boolean(task.isAllDay ?? task.allDay),
   items: (task.items || []).map((item) => ({
     status: item.status || 0,
