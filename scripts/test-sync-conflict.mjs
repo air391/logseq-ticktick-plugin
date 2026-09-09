@@ -67,6 +67,30 @@ try {
   });
   assert.equal(classifySyncState(baseline, convergedLocal, convergedRemote), 'converged');
 
+  // SCHEDULED is local-only planning metadata. Editing it must not make the Dida
+  // synchronization state appear dirty when the managed fields are unchanged.
+  const scheduledBaseline = snapshotFromLocalContent([
+    'TODO Scheduled local-only',
+    'SCHEDULED: <2026-09-10 Thu 09:00>',
+    'DEADLINE: <2026-09-12 Sat 18:00>',
+  ].join('\n'));
+  const scheduledEdited = snapshotFromLocalContent([
+    'TODO Scheduled local-only',
+    'SCHEDULED: <2026-09-11 Fri 14:00>',
+    'DEADLINE: <2026-09-12 Sat 18:00>',
+  ].join('\n'));
+  const scheduledRemote = snapshotFromRemoteTask({
+    id: 'date-1',
+    projectId: 'p1',
+    title: 'Scheduled local-only',
+    status: 0,
+    priority: 0,
+    startDate: new Date(2026, 8, 12, 18, 0).toISOString(),
+    dueDate: new Date(2026, 8, 12, 18, 0).toISOString(),
+  });
+  assert.deepEqual(scheduledEdited, scheduledBaseline);
+  assert.equal(classifySyncState(scheduledBaseline, scheduledEdited, scheduledRemote), 'unchanged');
+
   const checklistBaseline = snapshotFromLocalContent('TODO Parent', [
     { title: 'Child A', completed: false },
     { title: 'Child B', completed: false },
@@ -179,14 +203,15 @@ try {
   assert.equal(planChecklistApply(['A', 'B'], ['A', 'Inserted', 'B']), 'rebuild');
 
   const legacyBaseline = JSON.stringify({
-    title: 'Legacy', completed: false, priority: 0, startDate: null, dueDate: null,
+    title: 'Legacy', completed: false, priority: 0,
+    startDate: '2026-09-10T06:00:00.000Z', dueDate: null,
   });
   assert.deepEqual(parseSnapshot(legacyBaseline), {
     title: 'Legacy',
     completed: false,
     priority: 0,
     startDate: null,
-    dueDate: null,
+    dueDate: '2026-09-10T06:00:00.000Z',
     items: [],
   });
 
