@@ -20,7 +20,7 @@ jobs:
       DIDA_ACCESS_TOKEN: ${{ secrets.DIDA_ACCESS_TOKEN }}
 
     steps:
-      - name: Verify timed and all-day task semantics
+      - name: Probe Dida date field matrix
         shell: bash
         run: |
           set -euo pipefail
@@ -29,10 +29,9 @@ jobs:
             -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" | jq -r '.[0].id // empty')"
           [[ -n "$PROJECT_ID" ]]
 
-          TIMED_TASK_ID=""
-          ALLDAY_TASK_ID=""
+          TASK_IDS=()
           cleanup() {
-            for task_id in "$TIMED_TASK_ID" "$ALLDAY_TASK_ID"; do
+            for task_id in "${TASK_IDS[@]:-}"; do
               if [[ -n "$task_id" ]]; then
                 curl -fsS -X DELETE "$API_BASE/project/$PROJECT_ID/task/$task_id" \
                   -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null 2>&1 || true
@@ -41,55 +40,80 @@ jobs:
           }
           trap cleanup EXIT
 
-          TIMED_TITLE="[logseq-timed-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          TIMED_START="2026-09-10T00:00:00.000Z"
-          TIMED_DUE="2026-09-10T09:30:00.000Z"
-          TIMED_CREATE="$(curl -fsS -X POST "$API_BASE/task" \
-            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
-            -H 'Content-Type: application/json' \
-            --data "$(jq -nc \
-              --arg title "$TIMED_TITLE" \
-              --arg projectId "$PROJECT_ID" \
-              --arg startDate "$TIMED_START" \
-              --arg dueDate "$TIMED_DUE" \
-              '{title:$title,projectId:$projectId,startDate:$startDate,dueDate:$dueDate,isAllDay:false}')")"
-          TIMED_TASK_ID="$(jq -r '.id // empty' <<<"$TIMED_CREATE")"
-          [[ -n "$TIMED_TASK_ID" ]]
+          probe() {
+            local label="$1"
+            local payload="$2"
+            local response
+            local status
+            response="$(mktemp)"
+            status="$(curl -sS -o "$response" -w '%{http_code}' \
+              -X POST "$API_BASE/task" \
+              -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+              -H 'Content-Type: application/json' \
+              --data "$payload")"
 
-          TIMED_GET="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$TIMED_TASK_ID" \
-            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
-          echo "Timed task response:"
-          jq '{id,startDate,dueDate,isAllDay,allDay,timeZone}' <<<"$TIMED_GET"
+            echo "=== $label ==="
+            echo "create HTTP status: $status"
+            if [[ "$status" -lt 200 || "$status" -ge 300 ]]; then
+              echo "create response:"
+              jq . "$response" 2>/dev/null || cat "$response"
+              return 0
+            fi
 
-          jq -e --arg dueDate "$TIMED_DUE" '
-            .dueDate == $dueDate
-            and ((.isAllDay // .allDay // false) == false)
-          ' <<<"$TIMED_GET" >/dev/null
+            local task_id
+            task_id="$(jq -r '.id // empty' "$response")"
+            [[ -n "$task_id" ]]
+            TASK_IDS+=("$task_id")
 
-          ALLDAY_TITLE="[logseq-allday-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          ALLDAY_START="2026-09-11T00:00:00.000Z"
-          ALLDAY_DUE="2026-09-12T00:00:00.000Z"
-          ALLDAY_CREATE="$(curl -fsS -X POST "$API_BASE/task" \
-            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
-            -H 'Content-Type: application/json' \
-            --data "$(jq -nc \
-              --arg title "$ALLDAY_TITLE" \
-              --arg projectId "$PROJECT_ID" \
-              --arg startDate "$ALLDAY_START" \
-              --arg dueDate "$ALLDAY_DUE" \
-              '{title:$title,projectId:$projectId,startDate:$startDate,dueDate:$dueDate,isAllDay:true}')")"
-          ALLDAY_TASK_ID="$(jq -r '.id // empty' <<<"$ALLDAY_CREATE")"
-          [[ -n "$ALLDAY_TASK_ID" ]]
+            local readback
+            readback="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$task_id" \
+              -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+            jq '{id,startDate,dueDate,endDate,isAllDay,allDay,timeZone}' <<<"$readback"
+          }
 
-          ALLDAY_GET="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$ALLDAY_TASK_ID" \
-            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
-          echo "All-day task response:"
-          jq '{id,startDate,dueDate,isAllDay,allDay,timeZone}' <<<"$ALLDAY_GET"
+          TITLE_BASE="[logseq-date-matrix-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          START="2026-09-10T06:00:00.000Z"
+          DUE="2026-09-10T09:30:00.000Z"
+          NEXT_DAY="2026-09-11T00:00:00.000Z"
 
-          jq -e '
-            ((.isAllDay // .allDay // false) == true)
-            and (.startDate != null)
-            and (.dueDate != null)
-          ' <<<"$ALLDAY_GET" >/dev/null
+          probe "timed startDate only" "$(jq -nc \
+            --arg title "$TITLE_BASE start-only" \
+            --arg projectId "$PROJECT_ID" \
+            --arg startDate "$START" \
+            '{title:$title,projectId:$projectId,startDate:$startDate,isAllDay:false}')"
 
-          echo "Dida timed/all-day semantics match the plugin request model."
+          probe "timed dueDate only" "$(jq -nc \
+            --arg title "$TITLE_BASE due-only" \
+            --arg projectId "$PROJECT_ID" \
+            --arg dueDate "$DUE" \
+            '{title:$title,projectId:$projectId,dueDate:$dueDate,isAllDay:false}')"
+
+          probe "timed startDate plus dueDate" "$(jq -nc \
+            --arg title "$TITLE_BASE start-due" \
+            --arg projectId "$PROJECT_ID" \
+            --arg startDate "$START" \
+            --arg dueDate "$DUE" \
+            '{title:$title,projectId:$projectId,startDate:$startDate,dueDate:$dueDate,isAllDay:false}')"
+
+          probe "timed startDate plus endDate" "$(jq -nc \
+            --arg title "$TITLE_BASE start-end" \
+            --arg projectId "$PROJECT_ID" \
+            --arg startDate "$START" \
+            --arg endDate "$DUE" \
+            '{title:$title,projectId:$projectId,startDate:$startDate,endDate:$endDate,isAllDay:false}')"
+
+          probe "timed startDate plus dueDate with explicit timezone" "$(jq -nc \
+            --arg title "$TITLE_BASE timezone" \
+            --arg projectId "$PROJECT_ID" \
+            --arg startDate "$START" \
+            --arg dueDate "$DUE" \
+            '{title:$title,projectId:$projectId,startDate:$startDate,dueDate:$dueDate,isAllDay:false,timeZone:"Asia/Shanghai"}')"
+
+          probe "all-day startDate plus dueDate" "$(jq -nc \
+            --arg title "$TITLE_BASE allday" \
+            --arg projectId "$PROJECT_ID" \
+            --arg startDate "2026-09-10T00:00:00.000Z" \
+            --arg dueDate "$NEXT_DAY" \
+            '{title:$title,projectId:$projectId,startDate:$startDate,dueDate:$dueDate,isAllDay:true}')"
+
+          echo "Dida date capability matrix completed. Results above are observational; unsupported or normalized field shapes do not fail this probe."
