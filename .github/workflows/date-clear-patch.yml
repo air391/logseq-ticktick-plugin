@@ -1,0 +1,43 @@
+name: Apply Dida date-clear patch
+
+on:
+  push:
+    branches:
+      - ci/dida-api-smoke
+    paths:
+      - .github/workflows/date-clear-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/dida-api-smoke
+          fetch-depth: 0
+      - name: Patch remote date update payload
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/main.tsx')
+          text = path.read_text()
+          old = """      remoteTask = await ticktick.updateTask({\n        ...payload,\n        id: mapping.taskId,\n        projectId: mapping.projectId,\n        title: payload.title,\n        status: local.marker === 'DONE' ? 1 : 0,\n      });\n"""
+          new = """      remoteTask = await ticktick.updateTask({\n        ...payload,\n        id: mapping.taskId,\n        projectId: mapping.projectId,\n        title: payload.title,\n        // Dida OpenAPI exposes one canonical task date and accepts null to clear it.\n        // Send both fields explicitly so deleting Logseq DEADLINE also removes the\n        // remote reminder instead of leaving a stale date behind.\n        startDate: payload.dueDate ?? null,\n        dueDate: payload.dueDate ?? null,\n        status: local.marker === 'DONE' ? 1 : 0,\n      });\n"""
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one date update payload, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          git diff -- src/main.tsx
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.tsx
+          git commit -m "fix: clear removed Dida deadlines"
+          git push origin HEAD:ci/dida-api-smoke
