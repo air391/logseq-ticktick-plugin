@@ -1,5 +1,5 @@
 import { Task } from './ticktick/task';
-import { localStateToRemoteTask, parseLocalTaskState } from './task-state';
+import { canonicalRemoteDate, localStateToRemoteTask, parseLocalTaskState } from './task-state';
 
 export interface ManagedChecklistItemSnapshot {
   title: string;
@@ -10,6 +10,8 @@ export interface ManagedTaskSnapshot {
   title: string;
   completed: boolean;
   priority: 0 | 1 | 3 | 5;
+  // Retained in the serialized schema for backward compatibility. New snapshots
+  // always store the single Dida-managed date in dueDate and leave startDate null.
   startDate: string | null;
   dueDate: string | null;
   items: ManagedChecklistItemSnapshot[];
@@ -22,11 +24,17 @@ export type SyncDecision =
   | 'converged'
   | 'conflict';
 
-const normalizedDate = (value?: string): string | null => {
+const normalizedDate = (value?: string | null): string | null => {
   if (!value) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toISOString();
 };
+
+const canonicalizeSnapshotDate = (snapshot: ManagedTaskSnapshot): ManagedTaskSnapshot => ({
+  ...snapshot,
+  startDate: null,
+  dueDate: normalizedDate(snapshot.dueDate || snapshot.startDate),
+});
 
 export const snapshotFromLocalContent = (
   content: string,
@@ -38,7 +46,7 @@ export const snapshotFromLocalContent = (
     title: local.title,
     completed: local.marker === 'DONE',
     priority: local.priority,
-    startDate: normalizedDate(remoteShape.startDate),
+    startDate: null,
     dueDate: normalizedDate(remoteShape.dueDate),
     items,
   };
@@ -48,8 +56,8 @@ export const snapshotFromRemoteTask = (task: Task): ManagedTaskSnapshot => ({
   title: task.title || '',
   completed: task.status === 1 || Boolean(task.completedTime),
   priority: task.priority || 0,
-  startDate: normalizedDate(task.startDate),
-  dueDate: normalizedDate(task.dueDate),
+  startDate: null,
+  dueDate: normalizedDate(canonicalRemoteDate(task)),
   items: (task.items || []).map((item) => ({
     title: item.title || '',
     completed: item.status === 1 || Boolean(item.completedTime),
@@ -57,14 +65,14 @@ export const snapshotFromRemoteTask = (task: Task): ManagedTaskSnapshot => ({
 });
 
 export const serializeSnapshot = (snapshot: ManagedTaskSnapshot): string =>
-  JSON.stringify(snapshot);
+  JSON.stringify(canonicalizeSnapshotDate(snapshot));
 
 export const parseSnapshot = (value: string | undefined): ManagedTaskSnapshot | null => {
   if (!value) return null;
   try {
     const parsed = JSON.parse(value) as Partial<ManagedTaskSnapshot>;
     if (typeof parsed.title !== 'string' || typeof parsed.completed !== 'boolean') return null;
-    return {
+    return canonicalizeSnapshotDate({
       title: parsed.title,
       completed: parsed.completed,
       priority: parsed.priority === 1 || parsed.priority === 3 || parsed.priority === 5 ? parsed.priority : 0,
@@ -77,7 +85,7 @@ export const parseSnapshot = (value: string | undefined): ManagedTaskSnapshot | 
             )
             .map((item) => ({ title: item.title, completed: item.completed }))
         : [],
-    };
+    });
   } catch {
     return null;
   }
