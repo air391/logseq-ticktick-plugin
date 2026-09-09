@@ -343,6 +343,11 @@ const pushLocalTask = async (block: BlockEntity, showMessage = true): Promise<bo
         id: mapping.taskId,
         projectId: mapping.projectId,
         title: payload.title,
+        // Dida OpenAPI exposes one canonical task date and accepts null to clear it.
+        // Send both fields explicitly so deleting Logseq DEADLINE also removes the
+        // remote reminder instead of leaving a stale date behind.
+        startDate: payload.dueDate ?? null,
+        dueDate: payload.dueDate ?? null,
         status: local.marker === 'DONE' ? 1 : 0,
       });
       action = 'updated';
