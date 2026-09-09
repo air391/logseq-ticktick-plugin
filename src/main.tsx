@@ -44,7 +44,7 @@ let dbOffHook: (() => void) | null = null;
 const localPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const remoteWriteUntil = new Map<string, number>();
 
-const cleanupRuntime = (): void => {
+const cleanupRuntime = async (): Promise<void> => {
   if (refreshTimer) {
     clearInterval(refreshTimer);
     refreshTimer = null;
