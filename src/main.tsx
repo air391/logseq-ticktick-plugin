@@ -778,7 +778,21 @@ const main = async (): Promise<void> => {
   logseq.useSettingsSchema(settingsSchema);
   logseq.hideMainUI();
 
-  if (await logseq.App.checkCurrentIsDbGraph()) {
+  let isDbGraph = false;
+  try {
+    isDbGraph = await logseq.App.checkCurrentIsDbGraph();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('Not existed method #checkCurrentIsDbGraph')) {
+      // Older File Graph releases expose the JS proxy method but do not implement
+      // the backing RPC. In that case, continue with the legacy File Graph model.
+      console.info(`#${pluginId}: DB Graph detection is unavailable; assuming File Graph compatibility.`);
+    } else {
+      throw error;
+    }
+  }
+
+  if (isDbGraph) {
     await logseq.UI.showMsg(
       'Dida365/TickTick Sync currently supports Logseq File Graphs only. Sync is disabled for this DB Graph.',
       'warning',
