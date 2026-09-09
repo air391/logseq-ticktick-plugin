@@ -1,0 +1,79 @@
+name: Apply runtime guard patch
+
+on:
+  push:
+    branches:
+      - ci/dida-api-smoke
+    paths:
+      - .github/workflows/runtime-guard-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/dida-api-smoke
+          fetch-depth: 0
+      - name: Patch runtime guards
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/main.tsx')
+          text = path.read_text()
+
+          replacements = []
+
+          replacements.append((
+          """let refreshTimer: ReturnType<typeof setInterval> | null = null;\nlet refreshInFlight = false;\nconst localPushTimers = new Map<string, ReturnType<typeof setTimeout>>();\nconst remoteWriteUntil = new Map<string, number>();\n""",
+          """let refreshTimer: ReturnType<typeof setInterval> | null = null;\nlet refreshInFlight = false;\nlet settingsOffHook: (() => void) | null = null;\nlet dbOffHook: (() => void) | null = null;\nconst localPushTimers = new Map<string, ReturnType<typeof setTimeout>>();\nconst remoteWriteUntil = new Map<string, number>();\n\nconst cleanupRuntime = (): void => {\n  if (refreshTimer) {\n    clearInterval(refreshTimer);\n    refreshTimer = null;\n  }\n  for (const timer of localPushTimers.values()) clearTimeout(timer);\n  localPushTimers.clear();\n  remoteWriteUntil.clear();\n  refreshInFlight = false;\n  settingsOffHook?.();\n  settingsOffHook = null;\n  dbOffHook?.();\n  dbOffHook = null;\n};\n"""
+          ))
+
+          replacements.append((
+          """    const mapping = await getRemoteTaskMapping(block);\n    let remoteTask: Task;\n    let action: 'created' | 'updated';\n\n    if (mapping && mapping.service === service) {\n""",
+          """    const mapping = await getRemoteTaskMapping(block);\n    if (mapping && mapping.service !== service) {\n      const linkedServiceName = mapping.service === 'dida' ? 'Dida365' : 'TickTick';\n      if (showMessage) {\n        await logseq.UI.showMsg(\n          `Current block is already linked to ${linkedServiceName}. Unlink it before switching task services.`,\n          'warning',\n          { timeout: 5000 },\n        );\n      } else {\n        console.warn(\n          `Skipped automatic push because block ${block.uuid} is linked to ${mapping.service}, not ${service}.`,\n        );\n      }\n      return false;\n    }\n\n    let remoteTask: Task;\n    let action: 'created' | 'updated';\n\n    if (mapping) {\n"""
+          ))
+
+          replacements.append((
+          """  logseq.useSettingsSchema(settingsSchema);\n  logseq.hideMainUI();\n\n  let settings = applySettings();\n\n  logseq.onSettingsChanged(() => {\n""",
+          """  logseq.useSettingsSchema(settingsSchema);\n  logseq.hideMainUI();\n\n  if (await logseq.App.checkCurrentIsDbGraph()) {\n    await logseq.UI.showMsg(\n      'Dida365/TickTick Sync currently supports Logseq File Graphs only. Sync is disabled for this DB Graph.',\n      'warning',\n      { timeout: 7000 },\n    );\n    console.warn(`#${pluginId}: DB Graph detected; synchronization runtime was not started.`);\n    return;\n  }\n\n  let settings = applySettings();\n\n  settingsOffHook = logseq.onSettingsChanged(() => {\n"""
+          ))
+
+          replacements.append((
+          """  logseq.DB.onChanged(({ blocks }) => {\n    for (const block of blocks || []) void scheduleAutomaticPush(block);\n  });\n""",
+          """  dbOffHook = logseq.DB.onChanged(({ blocks }) => {\n    for (const block of blocks || []) void scheduleAutomaticPush(block);\n  });\n"""
+          ))
+
+          replacements.append((
+          """  configureAutoRefresh();\n  window.addEventListener('beforeunload', () => {\n    if (refreshTimer) clearInterval(refreshTimer);\n    for (const timer of localPushTimers.values()) clearTimeout(timer);\n    localPushTimers.clear();\n  });\n};\n""",
+          """  configureAutoRefresh();\n  logseq.beforeunload(cleanupRuntime);\n};\n"""
+          ))
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one runtime patch match, found {count}: {old[:80]!r}')
+              text = text.replace(old, new)
+
+          path.write_text(text)
+          PY
+
+          git diff --check
+          git diff -- src/main.tsx
+      - name: Commit runtime guards
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.tsx
+          git commit -m "fix: guard Logseq sync runtime"
+          git push origin HEAD:ci/dida-api-smoke
