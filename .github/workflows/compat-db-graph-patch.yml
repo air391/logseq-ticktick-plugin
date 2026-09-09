@@ -1,0 +1,43 @@
+name: Apply Logseq compatibility patch
+
+on:
+  push:
+    branches:
+      - ci/dida-api-smoke
+    paths:
+      - .github/workflows/compat-db-graph-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/dida-api-smoke
+          fetch-depth: 0
+      - name: Patch DB Graph capability detection
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/main.tsx')
+          text = path.read_text()
+          old = """  if (await logseq.App.checkCurrentIsDbGraph()) {\n    await logseq.UI.showMsg(\n      'Dida365/TickTick Sync currently supports Logseq File Graphs only. Sync is disabled for this DB Graph.',\n      'warning',\n      { timeout: 7000 },\n    );\n    console.warn(`#${pluginId}: DB Graph detected; synchronization runtime was not started.`);\n    return;\n  }\n"""
+          new = """  let isDbGraph = false;\n  try {\n    isDbGraph = await logseq.App.checkCurrentIsDbGraph();\n  } catch (error) {\n    const message = error instanceof Error ? error.message : String(error);\n    if (message.includes('Not existed method #checkCurrentIsDbGraph')) {\n      // Older File Graph releases expose the JS proxy method but do not implement\n      // the backing RPC. In that case, continue with the legacy File Graph model.\n      console.info(`#${pluginId}: DB Graph detection is unavailable; assuming File Graph compatibility.`);\n    } else {\n      throw error;\n    }\n  }\n\n  if (isDbGraph) {\n    await logseq.UI.showMsg(\n      'Dida365/TickTick Sync currently supports Logseq File Graphs only. Sync is disabled for this DB Graph.',\n      'warning',\n      { timeout: 7000 },\n    );\n    console.warn(`#${pluginId}: DB Graph detected; synchronization runtime was not started.`);\n    return;\n  }\n"""
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one DB Graph guard, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          git diff -- src/main.tsx
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.tsx
+          git commit -m "fix: support older Logseq File Graph runtimes"
+          git push origin HEAD:ci/dida-api-smoke
