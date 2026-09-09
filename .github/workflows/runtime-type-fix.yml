@@ -1,0 +1,43 @@
+name: Apply runtime cleanup type fix
+
+on:
+  push:
+    branches:
+      - ci/dida-api-smoke
+    paths:
+      - .github/workflows/runtime-type-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/dida-api-smoke
+          fetch-depth: 0
+      - name: Patch cleanup callback type
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/main.tsx')
+          text = path.read_text()
+          old = "const cleanupRuntime = (): void => {"
+          new = "const cleanupRuntime = async (): Promise<void> => {"
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one cleanup signature, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          git diff -- src/main.tsx
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.tsx
+          git commit -m "fix: match Logseq cleanup callback type"
+          git push origin HEAD:ci/dida-api-smoke
