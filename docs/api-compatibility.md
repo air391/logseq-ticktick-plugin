@@ -13,7 +13,7 @@ The real Dida API smoke test validates project listing and task CRUD using the r
 
 The synchronization model currently treats one remote task date/time as canonical for both supported backends. This choice is required for Dida365 and is intentionally applied at the shared task-state layer so the plugin does not promise different date semantics depending on which backend is selected.
 
-Dida's OpenAPI task representation does **not** expose `startDate` and `dueDate` as two independently reliable task timestamps. Real API probes created isolated tasks with several request shapes and immediately read them back:
+Dida's OpenAPI task representation does **not** expose `startDate` and `dueDate` as two independently reliable task timestamps. Real API probes create isolated disposable tasks, immediately read them back, and clean them up. They confirm:
 
 - sending only `startDate` makes both returned `startDate` and `dueDate` equal that value;
 - sending only `dueDate` makes both returned fields equal that value;
