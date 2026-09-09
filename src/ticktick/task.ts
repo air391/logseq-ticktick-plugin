@@ -17,13 +17,13 @@ export interface Task {
     completedTime?: string;
     content?: string;
     desc?: string;
-    dueDate?: string;
+    dueDate?: string | null;
     items?: Subtask[];
     priority?: TaskPriority;
     reminders?: string[];
     repeat?: string;
     sortOrder?: number;
-    startDate?: string;
+    startDate?: string | null;
     status?: 0 | 1;
     timeZone?: string;
     taskUrl?: string;
@@ -45,7 +45,7 @@ export interface Subtask {
     completedTime?: string;
     isAllDay?: boolean;
     sortOrder?: number;
-    startDate?: string;
+    startDate?: string | null;
     timeZone?: string;
 }
 
