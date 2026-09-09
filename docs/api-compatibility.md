@@ -7,6 +7,8 @@ The plugin supports both Dida365 and TickTick through the same task client abstr
 | Dida365 | `https://api.dida365.com/open/v1` | `https://dida365.com/oauth/token` | `https://dida365.com/webapp` |
 | TickTick | `https://api.ticktick.com/open/v1` | `https://ticktick.com/oauth/token` | `https://ticktick.com/webapp` |
 
+A linked Logseq block is also bound to the service that created the mapping. Changing the plugin setting from Dida365 to TickTick, or vice versa, does not silently migrate/rebind that block: push is blocked until the existing relationship is explicitly unlinked. This prevents the same Logseq task from accidentally creating a second remote task on another backend.
+
 The real Dida API smoke test validates project listing and task CRUD using the repository secret. It also validates the request shape currently emitted by the Logseq command when creating a task without an explicit project ID.
 
 ## Task date semantics
@@ -56,3 +58,5 @@ Logseq DB Graph uses a different data model for block text, task status, priorit
 That query work is only groundwork, not a claim of complete DB Graph support. The task synchronization layer still models Logseq tasks from File Graph text such as `TODO`, `[#A]`, `SCHEDULED`, and `DEADLINE`, and still reads the legacy block `content` field in several runtime paths. DB Graph uses first-class task/property data and `title` instead of the same File Graph representation.
 
 The runtime therefore detects a DB Graph at startup, displays a warning, and does not start synchronization hooks or polling. Until the task/content adapters are implemented and tested against a real DB Graph, DB Graph synchronization is unsupported rather than partially enabled.
+
+On unload/hot reload, the runtime unregisters settings/database hooks and clears polling, debounce, and temporary write-suppression state so repeated development reloads do not stack multiple synchronization listeners.
