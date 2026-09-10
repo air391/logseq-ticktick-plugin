@@ -1,0 +1,150 @@
+name: Dida Date Shape Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/dida-api-smoke
+    paths:
+      - .github/workflows/dida-date-shape-probe.yml
+      - src/task-state.ts
+
+permissions:
+  contents: read
+
+jobs:
+  dida-date-shape-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DIDA_ACCESS_TOKEN: ${{ secrets.DIDA_ACCESS_TOKEN }}
+
+    steps:
+      - name: Probe Dida date field matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_BASE="https://api.dida365.com/open/v1"
+          PROJECT_ID="$(curl -fsS "$API_BASE/project" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" | jq -r '.[0].id // empty')"
+          [[ -n "$PROJECT_ID" ]]
+
+          TASK_IDS=()
+          cleanup() {
+            for task_id in "${TASK_IDS[@]:-}"; do
+              if [[ -n "$task_id" ]]; then
+                curl -fsS -X DELETE "$API_BASE/project/$PROJECT_ID/task/$task_id" \
+                  -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null 2>&1 || true
+              fi
+            done
+          }
+          trap cleanup EXIT
+
+          probe() {
+            local label="$1"
+            local payload="$2"
+            local response
+            local status
+            response="$(mktemp)"
+            status="$(curl -sS -o "$response" -w '%{http_code}' \
+              -X POST "$API_BASE/task" \
+              -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+              -H 'Content-Type: application/json' \
+              --data "$payload")"
+
+            echo "=== $label ==="
+            echo "create HTTP status: $status"
+            if [[ "$status" -lt 200 || "$status" -ge 300 ]]; then
+              echo "create response:"
+              jq . "$response" 2>/dev/null || cat "$response"
+              return 0
+            fi
+
+            local task_id
+            task_id="$(jq -r '.id // empty' "$response")"
+            [[ -n "$task_id" ]]
+            TASK_IDS+=("$task_id")
+
+            local readback
+            readback="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$task_id" \
+              -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+            jq '{id,startDate,dueDate,endDate,isAllDay,allDay,timeZone}' <<<"$readback"
+          }
+
+          TITLE_BASE="[logseq-date-matrix-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          START="2026-09-10T06:00:00.000Z"
+          DUE="2026-09-10T09:30:00.000Z"
+          NEXT_DAY="2026-09-11T00:00:00.000Z"
+
+          probe "timed startDate only" "$(jq -nc \
+            --arg title "$TITLE_BASE start-only" \
+            --arg projectId "$PROJECT_ID" \
+            --arg startDate "$START" \
+            '{title:$title,projectId:$projectId,startDate:$startDate,isAllDay:false}')"
+
+          probe "timed dueDate only" "$(jq -nc \
+            --arg title "$TITLE_BASE due-only" \
+            --arg projectId "$PROJECT_ID" \
+            --arg dueDate "$DUE" \
+            '{title:$title,projectId:$projectId,dueDate:$dueDate,isAllDay:false}')"
+
+          probe "timed startDate plus dueDate" "$(jq -nc \
+            --arg title "$TITLE_BASE start-due" \
+            --arg projectId "$PROJECT_ID" \
+            --arg startDate "$START" \
+            --arg dueDate "$DUE" \
+            '{title:$title,projectId:$projectId,startDate:$startDate,dueDate:$dueDate,isAllDay:false}')"
+
+          probe "timed startDate plus endDate" "$(jq -nc \
+            --arg title "$TITLE_BASE start-end" \
+            --arg projectId "$PROJECT_ID" \
+            --arg startDate "$START" \
+            --arg endDate "$DUE" \
+            '{title:$title,projectId:$projectId,startDate:$startDate,endDate:$endDate,isAllDay:false}')"
+
+          probe "timed startDate plus dueDate with explicit timezone" "$(jq -nc \
+            --arg title "$TITLE_BASE timezone" \
+            --arg projectId "$PROJECT_ID" \
+            --arg startDate "$START" \
+            --arg dueDate "$DUE" \
+            '{title:$title,projectId:$projectId,startDate:$startDate,dueDate:$dueDate,isAllDay:false,timeZone:"Asia/Shanghai"}')"
+
+          probe "all-day startDate plus dueDate" "$(jq -nc \
+            --arg title "$TITLE_BASE allday" \
+            --arg projectId "$PROJECT_ID" \
+            --arg startDate "2026-09-10T00:00:00.000Z" \
+            --arg dueDate "$NEXT_DAY" \
+            '{title:$title,projectId:$projectId,startDate:$startDate,dueDate:$dueDate,isAllDay:true}')"
+
+          echo "=== clear existing date with null ==="
+          CLEAR_CREATE="$(curl -fsS -X POST "$API_BASE/task" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc \
+              --arg title "$TITLE_BASE clear-date" \
+              --arg projectId "$PROJECT_ID" \
+              --arg dueDate "$DUE" \
+              '{title:$title,projectId:$projectId,dueDate:$dueDate,isAllDay:false}')")"
+          CLEAR_TASK_ID="$(jq -r '.id // empty' <<<"$CLEAR_CREATE")"
+          [[ -n "$CLEAR_TASK_ID" ]]
+          TASK_IDS+=("$CLEAR_TASK_ID")
+
+          CLEAR_STATUS="$(curl -sS -o /tmp/dida-clear-update.json -w '%{http_code}' \
+            -X POST "$API_BASE/task/$CLEAR_TASK_ID" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc \
+              --arg id "$CLEAR_TASK_ID" \
+              --arg projectId "$PROJECT_ID" \
+              --arg title "$TITLE_BASE clear-date" \
+              '{id:$id,projectId:$projectId,title:$title,startDate:null,dueDate:null,isAllDay:false,status:0}')")"
+          echo "clear update HTTP status: $CLEAR_STATUS"
+          if [[ "$CLEAR_STATUS" -ge 200 && "$CLEAR_STATUS" -lt 300 ]]; then
+            CLEAR_GET="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$CLEAR_TASK_ID" \
+              -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+            jq '{id,startDate,dueDate,isAllDay,timeZone}' <<<"$CLEAR_GET"
+          else
+            jq . /tmp/dida-clear-update.json 2>/dev/null || cat /tmp/dida-clear-update.json
+          fi
+
+          echo "Dida date capability matrix completed. Results above are observational; unsupported or normalized field shapes do not fail this probe."

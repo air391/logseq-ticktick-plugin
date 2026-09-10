@@ -1,0 +1,79 @@
+name: Dida Subtask Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/dida-api-smoke
+    paths:
+      - .github/workflows/dida-subtask-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DIDA_ACCESS_TOKEN: ${{ secrets.DIDA_ACCESS_TOKEN }}
+
+    steps:
+      - name: Probe checklist item identity and status
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_BASE="https://api.dida365.com/open/v1"
+          PROJECT_ID="$(curl -fsS "$API_BASE/project" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" | jq -r '.[0].id // empty')"
+          [[ -n "$PROJECT_ID" ]]
+
+          TITLE="[logseq-subtask-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CREATE_FILE="$(mktemp)"
+          curl -fsS -X POST "$API_BASE/task" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg title "$TITLE" --arg projectId "$PROJECT_ID" '{title:$title,projectId:$projectId,items:[{title:"child-a",status:0},{title:"child-b",status:1}]}')" > "$CREATE_FILE"
+
+          TASK_ID="$(jq -r '.id // empty' "$CREATE_FILE")"
+          cleanup() {
+            if [[ -n "${TASK_ID:-}" ]]; then
+              curl -fsS -X DELETE "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
+                -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          GET1="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          echo "Initial checklist shape:"
+          jq -c '[.items[]? | {hasId:has("id"), id:(.id // null), title, status:(.status // null), sortOrder:(.sortOrder // null)}]' <<< "$GET1"
+          jq -e '(.items | length) == 2' <<< "$GET1" >/dev/null
+
+          ID_A="$(jq -r '.items[0].id // empty' <<< "$GET1")"
+          ID_B="$(jq -r '.items[1].id // empty' <<< "$GET1")"
+
+          UPDATE_ITEMS="$(jq -c '[.items[] | if .title == "child-a" then (.title="child-a-updated" | .status=1) else . end]' <<< "$GET1")"
+          curl -fsS -X POST "$API_BASE/task/$TASK_ID" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg id "$TASK_ID" --arg projectId "$PROJECT_ID" --arg title "$TITLE" --argjson items "$UPDATE_ITEMS" '{id:$id,projectId:$projectId,title:$title,items:$items}')" >/dev/null
+
+          GET2="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          echo "Checklist shape after update:"
+          jq -c '[.items[]? | {id:(.id // null), title, status:(.status // null)}]' <<< "$GET2"
+
+          ID_A2="$(jq -r '.items[] | select(.title == "child-a-updated") | .id // empty' <<< "$GET2")"
+          ID_B2="$(jq -r '.items[] | select(.title == "child-b") | .id // empty' <<< "$GET2")"
+
+          if [[ -n "$ID_A" && -n "$ID_A2" && "$ID_A" == "$ID_A2" ]]; then
+            echo "First checklist item keeps a stable id across updates."
+          else
+            echo "First checklist item id is missing or unstable."
+          fi
+          if [[ -n "$ID_B" && -n "$ID_B2" && "$ID_B" == "$ID_B2" ]]; then
+            echo "Second checklist item keeps a stable id across updates."
+          else
+            echo "Second checklist item id is missing or unstable."
+          fi
+
+          jq -e '.items[] | select(.title == "child-a-updated" and .status == 1)' <<< "$GET2" >/dev/null
+          echo "Checklist title/status updates are supported."

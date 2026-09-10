@@ -1,0 +1,270 @@
+name: Dida API Smoke Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/dida-api-smoke
+    paths:
+      - .github/workflows/dida-api-smoke.yml
+      - src/ticktick/**
+      - src/task-state.ts
+
+permissions:
+  contents: read
+
+jobs:
+  dida-api-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DIDA_ACCESS_TOKEN: ${{ secrets.DIDA_ACCESS_TOKEN }}
+
+    steps:
+      - name: Verify secret is configured
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${DIDA_ACCESS_TOKEN:-}" ]]; then
+            echo "DIDA_ACCESS_TOKEN is not configured."
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install official Dida CLI
+        run: npm install --global @suibiji/dida-cli
+
+      - name: Authenticate with Dida
+        shell: bash
+        run: |
+          set -euo pipefail
+          dida auth token "$DIDA_ACCESS_TOKEN"
+          dida auth status
+
+      - name: Verify project data endpoint used by picker and inbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_BASE="https://api.dida365.com/open/v1"
+          PROJECTS_FILE="$(mktemp)"
+          curl -fsS "$API_BASE/project" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" > "$PROJECTS_FILE"
+
+          PROJECT_ID="$(jq -r '.[0].id // empty' "$PROJECTS_FILE")"
+          if [[ -z "$PROJECT_ID" ]]; then
+            echo "No Dida project is available for project-data smoke testing."
+            exit 1
+          fi
+
+          DATA_FILE="$(mktemp)"
+          curl -fsS "$API_BASE/project/$PROJECT_ID/data" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" > "$DATA_FILE"
+
+          jq -e '.project.id and (.tasks | type == "array")' "$DATA_FILE" >/dev/null
+          echo "Project data endpoint returned project metadata and a task array."
+
+      - name: Run real Dida CRUD smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_ID=""
+          TASK_ID=""
+
+          cleanup() {
+            if [[ -n "$PROJECT_ID" && -n "$TASK_ID" ]]; then
+              echo "Cleaning up CI task..."
+              dida task delete "$PROJECT_ID" "$TASK_ID" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          echo "Listing projects..."
+          PROJECTS_JSON="$(dida project list --json)"
+          PROJECT_ID="$(printf '%s' "$PROJECTS_JSON" | jq -r 'if type == "array" then .[0].id else (.projects // .data // [])[0].id end // empty')"
+
+          if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "null" ]]; then
+            echo "Could not find a project in Dida."
+            printf '%s\n' "$PROJECTS_JSON" | jq . || true
+            exit 1
+          fi
+
+          TITLE="[logseq-dida-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          UPDATED_TITLE="${TITLE} updated"
+
+          echo "Creating task in project ${PROJECT_ID}..."
+          CREATED_JSON="$(dida task create --title "$TITLE" --project "$PROJECT_ID" --json)"
+          TASK_ID="$(printf '%s' "$CREATED_JSON" | jq -r '.id // .task.id // .data.id // empty')"
+
+          if [[ -z "$TASK_ID" || "$TASK_ID" == "null" ]]; then
+            echo "Task creation returned no task id."
+            printf '%s\n' "$CREATED_JSON" | jq . || true
+            exit 1
+          fi
+
+          echo "Reading created task..."
+          GET_JSON="$(dida task get "$PROJECT_ID" "$TASK_ID" --json)"
+          ACTUAL_TITLE="$(printf '%s' "$GET_JSON" | jq -r '.title // .task.title // .data.title // empty')"
+          [[ "$ACTUAL_TITLE" == "$TITLE" ]]
+
+          echo "Updating task..."
+          dida task update "$TASK_ID" --id "$TASK_ID" --project "$PROJECT_ID" --title "$UPDATED_TITLE" --json >/tmp/dida-update.json
+
+          echo "Verifying update..."
+          GET_UPDATED_JSON="$(dida task get "$PROJECT_ID" "$TASK_ID" --json)"
+          ACTUAL_UPDATED_TITLE="$(printf '%s' "$GET_UPDATED_JSON" | jq -r '.title // .task.title // .data.title // empty')"
+          [[ "$ACTUAL_UPDATED_TITLE" == "$UPDATED_TITLE" ]]
+
+          echo "Completing task..."
+          dida task complete "$PROJECT_ID" "$TASK_ID"
+
+          echo "Deleting test task..."
+          dida task delete "$PROJECT_ID" "$TASK_ID"
+          TASK_ID=""
+
+          echo "Dida real API CRUD smoke test passed."
+
+      - name: Verify date update and probe reopen behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_BASE="https://api.dida365.com/open/v1"
+          PROJECT_ID="$(curl -fsS "$API_BASE/project" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" | jq -r '.[0].id // empty')"
+          [[ -n "$PROJECT_ID" ]]
+
+          TITLE="[logseq-date-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CREATE_FILE="$(mktemp)"
+          curl -fsS -X POST "$API_BASE/task" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg title "$TITLE" --arg projectId "$PROJECT_ID" '{title:$title,projectId:$projectId}')" > "$CREATE_FILE"
+
+          TASK_ID="$(jq -r '.id // empty' "$CREATE_FILE")"
+          cleanup() {
+            if [[ -n "${TASK_ID:-}" ]]; then
+              curl -fsS -X DELETE "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
+                -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          START_DATE="2026-09-09T06:00:00.000Z"
+          DUE_DATE="2026-09-10T08:30:00.000Z"
+          curl -fsS -X POST "$API_BASE/task/$TASK_ID" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg id "$TASK_ID" --arg projectId "$PROJECT_ID" --arg title "$TITLE" --arg startDate "$START_DATE" --arg dueDate "$DUE_DATE" '{id:$id,projectId:$projectId,title:$title,startDate:$startDate,dueDate:$dueDate,status:0}')" >/dev/null
+
+          DATE_GET="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          jq -e '(.startDate != null) and (.dueDate != null)' <<<"$DATE_GET" >/dev/null
+          echo "Date update is supported."
+
+          curl -fsS -X POST "$API_BASE/project/$PROJECT_ID/task/$TASK_ID/complete" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null
+
+          curl -fsS -X POST "$API_BASE/task/$TASK_ID" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg id "$TASK_ID" --arg projectId "$PROJECT_ID" --arg title "$TITLE" '{id:$id,projectId:$projectId,title:$title,status:0}')" >/dev/null
+
+          REOPEN_GET="$(curl -fsS "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          STATUS="$(jq -r '.status // empty' <<<"$REOPEN_GET")"
+          COMPLETED_TIME="$(jq -r '.completedTime // empty' <<<"$REOPEN_GET")"
+          echo "Reopen probe result: status=$STATUS completedTime=${COMPLETED_TIME:-<empty>}"
+          if [[ "$STATUS" == "0" && ( -z "$COMPLETED_TIME" || "$COMPLETED_TIME" == "null" ) ]]; then
+            echo "Open API currently reopened the task, but plugin remains conservative until this behavior is documented."
+          else
+            echo "Open API did not reliably reopen the completed task; plugin will guard this operation."
+          fi
+
+      - name: Probe plugin-shaped system Inbox task behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          API_BASE="https://api.dida365.com/open/v1"
+          TITLE="[logseq-plugin-shape-ci] ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          RESPONSE_FILE="$(mktemp)"
+          TASK_ID=""
+          PROJECT_ID=""
+
+          cleanup() {
+            if [[ -n "$TASK_ID" && -n "$PROJECT_ID" ]]; then
+              curl -fsS -X DELETE \
+                "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
+                -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          STATUS="$(curl -sS -o "$RESPONSE_FILE" -w '%{http_code}' \
+            -X POST "$API_BASE/task" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg title "$TITLE" '{title:$title,priority:0,items:[]}')")"
+          [[ "$STATUS" -ge 200 && "$STATUS" -lt 300 ]]
+
+          TASK_ID="$(jq -r '.id // empty' "$RESPONSE_FILE")"
+          PROJECT_ID="$(jq -r '.projectId // empty' "$RESPONSE_FILE")"
+          [[ -n "$TASK_ID" && -n "$PROJECT_ID" ]]
+          echo "No-projectId create assigned task to projectId=$PROJECT_ID"
+
+          PROJECTS_JSON="$(curl -fsS "$API_BASE/project" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          if jq -e --arg projectId "$PROJECT_ID" 'any(.[]; .id == $projectId)' <<<"$PROJECTS_JSON" >/dev/null; then
+            echo "Assigned project is present in /project enumeration."
+          else
+            echo "Assigned system Inbox project is NOT present in /project enumeration."
+          fi
+
+          probe_data() {
+            local label="$1"
+            local project="$2"
+            local output
+            output="$(mktemp)"
+            local status
+            status="$(curl -sS -o "$output" -w '%{http_code}' \
+              "$API_BASE/project/$project/data" \
+              -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+            echo "$label project-data HTTP status: $status"
+            if [[ "$status" -ge 200 && "$status" -lt 300 ]]; then
+              if jq -e --arg taskId "$TASK_ID" 'any(.tasks[]?; .id == $taskId)' "$output" >/dev/null; then
+                echo "$label project-data contains the created Inbox task."
+                return 0
+              fi
+              echo "$label project-data succeeded but does not contain the created Inbox task."
+            fi
+            return 1
+          }
+
+          LISTABLE=0
+          if probe_data "literal inbox" "inbox"; then LISTABLE=1; fi
+          if probe_data "returned projectId" "$PROJECT_ID"; then LISTABLE=1; fi
+
+          DIRECT_FILE="$(mktemp)"
+          DIRECT_STATUS="$(curl -sS -o "$DIRECT_FILE" -w '%{http_code}' \
+            "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN")"
+          echo "Direct Inbox task read HTTP status: $DIRECT_STATUS"
+          if [[ "$DIRECT_STATUS" -lt 200 || "$DIRECT_STATUS" -ge 300 ]]; then
+            echo "A newly created Inbox task cannot even be read back by known project/task IDs."
+            exit 1
+          fi
+          jq -e --arg taskId "$TASK_ID" '.id == $taskId' "$DIRECT_FILE" >/dev/null
+
+          if [[ "$LISTABLE" -eq 1 ]]; then
+            echo "System Inbox listing is available through at least one OpenAPI project-data form."
+          else
+            echo "System Inbox listing is unavailable through tested OpenAPI project-data forms; only direct known-ID access is available."
+          fi
+
+          curl -fsS -X DELETE \
+            "$API_BASE/project/$PROJECT_ID/task/$TASK_ID" \
+            -H "Authorization: Bearer $DIDA_ACCESS_TOKEN" >/dev/null
+          TASK_ID=""
+
+          echo "System Inbox behavior probe completed and cleaned up."

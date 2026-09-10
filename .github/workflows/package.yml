@@ -1,0 +1,83 @@
+name: Package Plugin
+
+on:
+  push:
+    branches:
+      - ci/dida-api-smoke
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.9
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Assemble plugin package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p package/logseq-ticktick-plugin
+          cp -r dist package/logseq-ticktick-plugin/dist
+          cp package.json package/logseq-ticktick-plugin/package.json
+          cp logo.png package/logseq-ticktick-plugin/logo.png
+          cp readme.md package/logseq-ticktick-plugin/readme.md
+          cd package
+          zip -r ../logseq-ticktick-plugin.zip logseq-ticktick-plugin
+      - name: Validate plugin package contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s logseq-ticktick-plugin.zip
+          rm -rf /tmp/logseq-plugin-smoke
+          mkdir -p /tmp/logseq-plugin-smoke
+          unzip -q logseq-ticktick-plugin.zip -d /tmp/logseq-plugin-smoke
+          ROOT=/tmp/logseq-plugin-smoke/logseq-ticktick-plugin
+
+          test -f "$ROOT/package.json"
+          test -f "$ROOT/logo.png"
+          test -f "$ROOT/readme.md"
+
+          MAIN="$(jq -r '.main // empty' "$ROOT/package.json")"
+          PLUGIN_ID="$(jq -r '.logseq.id // empty' "$ROOT/package.json")"
+          test "$MAIN" = "dist/index.html"
+          test "$PLUGIN_ID" = "logseq-ticktick-plugin"
+          test -f "$ROOT/$MAIN"
+
+          mapfile -t ASSETS < <(grep -oE 'assets/[^" ]+\.(js|css)' "$ROOT/$MAIN" | sort -u)
+          test "${#ASSETS[@]}" -ge 2
+          for asset in "${ASSETS[@]}"; do
+            test -s "$ROOT/dist/$asset"
+          done
+
+          JS_FILE="$(find "$ROOT/dist/assets" -maxdepth 1 -type f -name '*.js' -print -quit)"
+          test -n "$JS_FILE"
+          for command in \
+            'Dida Create / Sync' \
+            'Dida Pull Remote' \
+            'Dida Pull All Linked' \
+            'Dida Link Existing' \
+            'Dida Refresh Inbox' \
+            'Dida Resolve Conflict - Keep Logseq' \
+            'Dida Resolve Conflict - Use Dida'; do
+            grep -Fq "$command" "$JS_FILE"
+          done
+
+          echo "Packaged Logseq plugin contract passed."
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: logseq-ticktick-plugin
+          path: logseq-ticktick-plugin.zip
+          if-no-files-found: error

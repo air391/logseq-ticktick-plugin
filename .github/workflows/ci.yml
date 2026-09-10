@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - ci/dida-api-smoke
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.9
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: node scripts/test-sync-conflict.mjs
+      - run: node scripts/test-inbox-content.mjs
+      - run: node scripts/test-task-enumeration.mjs
+      - run: node scripts/test-task-state.mjs

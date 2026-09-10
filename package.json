@@ -1,7 +1,7 @@
 {
   "name": "logseq-ticktick-plugin",
   "version": "1.1.2",
-  "description": "TickTick plugin for Logseq.",
+  "description": "Bidirectional Dida365/TickTick task synchronization for Logseq.",
   "main": "dist/index.html",
   "scripts": {
     "dev": "vite",
@@ -9,10 +9,10 @@
     "preinstall": "npx only-allow pnpm"
   },
   "license": "MIT",
-  "author": "Maximilian Schöll",
+  "author": "Maximilian Schöll; Dida365 sync fork maintained by air391",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mxschll/logseq-ticktick-plugin"
+    "url": "https://github.com/air391/logseq-ticktick-plugin"
   },
   "dependencies": {
     "@logseq/libs": "^0.0.14",
@@ -24,7 +24,7 @@
     "@semantic-release/changelog": "6.0.3",
     "@semantic-release/exec": "6.0.3",
     "@semantic-release/git": "10.0.1",
-    "@semantic-release/npm": "^12.0.1",
+    "@semantic-release/npm": "10.0.3",
     "@types/node": "18.15.11",
     "@types/react": "18.0.33",
     "@types/react-dom": "18.0.11",
@@ -36,16 +36,16 @@
     "eslint": "8.38.0",
     "eslint-plugin-react": "7.32.2",
     "eslint-plugin-react-hooks": "4.6.0",
-    "postcss": "^8.4.41",
-    "semantic-release": "^24.1.0",
+    "postcss": "8.4.21",
+    "semantic-release": "21.0.1",
     "tailwindcss": "3.3.1",
     "typescript": "4.9.5",
-    "vite": "^4.5.3",
+    "vite": "4.2.1",
     "vite-plugin-logseq": "1.1.2"
   },
   "logseq": {
     "id": "logseq-ticktick-plugin",
-    "title": "TickTick",
+    "title": "Dida365 / TickTick Sync",
     "icon": "./logo.png"
   }
 }
