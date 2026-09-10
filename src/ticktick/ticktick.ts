@@ -152,8 +152,8 @@ class TickTick {
         if (this.service === 'dida') {
             try {
                 // Dida's system Inbox is a real project-data source, but it is not
-                // returned by GET /project. Real API tests verify that the literal
-                // `inbox` alias lists the same tasks created without a projectId.
+                // returned by GET /project. Some runtimes omit the embedded project
+                // metadata, so callers must tolerate a missing `project` object.
                 available.push(await this.getProjectData('inbox'));
             } catch (error) {
                 console.warn('Failed to load Dida system Inbox', error);
@@ -172,8 +172,12 @@ class TickTick {
             for (const task of data.tasks || []) {
                 if (task.status === 1 || task.completedTime || seenTaskIds.has(task.id)) continue;
                 seenTaskIds.add(task.id);
+                const project = data.project || {
+                    id: task.projectId || 'inbox',
+                    name: 'Inbox',
+                } as Project;
                 tasks.push({
-                    project: data.project,
+                    project,
                     task: this.withTaskUrl(task),
                 });
             }
