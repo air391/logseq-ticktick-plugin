@@ -7,6 +7,20 @@ const propertyKeywordForDbGraph = async (key: string): Promise<string | null> =>
   return ident.startsWith(':') ? ident : `:${ident}`;
 };
 
+const currentIsDbGraph = async (): Promise<boolean> => {
+  try {
+    return await logseq.App.checkCurrentIsDbGraph();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('Not existed method #checkCurrentIsDbGraph')) {
+      // Older File Graph runtimes expose the JS proxy but do not implement the RPC.
+      // Those releases are File Graph-only, so the legacy property query is correct.
+      return false;
+    }
+    throw error;
+  }
+};
+
 export const readPluginProperty = (
   properties: Record<string, any>,
   key: string,
@@ -27,7 +41,7 @@ export const queryBlocksByPluginProperty = async (
   key: string,
   value?: string,
 ): Promise<BlockEntity[]> => {
-  const isDbGraph = await logseq.App.checkCurrentIsDbGraph();
+  const isDbGraph = await currentIsDbGraph();
 
   if (isDbGraph) {
     const propertyKeyword = await propertyKeywordForDbGraph(key);
